@@ -9,10 +9,19 @@ It primarily has the following features:
   - For example, creating a scenario with 1000 nodes and 10,000 jobs can be easily defined using for loops
   - When different parameters are needed per node or job, values can be randomly generated within a specified range or jittered
 - Internally manages virtual time, enabling fast scenario execution independent of real time while maintaining temporal consistency
-  - For example, a scenario involving 1,000 jobs each taking 3 days to execute can run in minutes
+  - For example, a scenario involving 1,000 jobs each taking 3 days to execute can run in seconds
+- Multiple execution environments available
+  - Since emulating controllers internally, evaluations can be executed with a single binary without preparing a Kubernetes cluster
+  - External Kubernetes cluster mode is also available. Lightweight clusters such as kwok and kind can also be used
 - Stable execution even for high-load scenarios
   - Robust operation achieved through API server load mitigation and internal instability absorption
   - Sequential processing of node/job creation/deletion events via channels reduces memory usage
+
+## Architecture
+
+![architecture](./docs/images/architecture.png)
+
+kube-scheduler-evaluator emulates controllers internally, enabling evaluations to be executed with a single binary without preparing a Kubernetes cluster. It receives multiple scenarios defined in Go from the user, executes CRUD operations on objects against internal controller while managing virtual time, and simultaneously sends metrics to time-series databases like Victoria Metrics.
 
 ## Quick Start
 
@@ -23,11 +32,20 @@ It primarily has the following features:
 Import kube-scheduler-evaluator as shown below, implement a scenario generator function, and create a program to execute evaluations.
 The scenario generator function receives an event channel and sends events to the channel to create or delete nodes and jobs (actually ReplicaSets).
 Therefore, users can execute arbitrary scenarios by implementing the scenario generator function.
-Use the `WithScenario` function to pass the scenario name, number of executions, and scenario generator function to the kube-scheduler-evaluator.
+Use the `WithScenario` function to pass the scenario name, number of executions, scenario generator function, scheduler registry, and scheduler options to the kube-scheduler-evaluator.
+
 For implementation details, refer to the [kube-scheduler-evaluator-reference](https://github.com/pfnet/kube-scheduler-evaluator-reference).
 
 ```go
+package main
+
 import (
+  "context"
+  "os"
+
+  "github.com/pfnet/kube-scheduler-evaluator-reference/scenarios/clusterdata"
+  "github.com/pfnet/kube-scheduler-evaluator-reference/scenarios/consts"
+  "github.com/pfnet/kube-scheduler-evaluator-reference/scenarios/example"
   "github.com/pfnet/kube-scheduler-evaluator/cmd/evaluator"
   "github.com/pfnet/kube-scheduler-evaluator/pkg/definition"
 
@@ -171,6 +189,15 @@ func scenarioGenerator1(ch chan<- Event) {
   }
 }
 ```
+
+## `externalMode`
+
+![externalMode](./docs/images/ext.png)
+
+By default, the evaluator operates by emulating controllers internally. However, when `externalMode` is enabled, evaluations can be executed using an external Kubernetes cluster. To enable `externalMode`, pass `true` as the 5th argument to the `evaluator.WithConfig` function.
+In this mode, kube-scheduler-evaluator communicates with the Kubernetes API server and sends node and job creation/deletion events to the external cluster. Besides using a real Kubernetes cluster, you can also use lightweight Kubernetes clusters (e.g., kwok, kind) to conduct evaluations while minimizing resource consumption.
+
+Note that when using `externalMode`, scenario execution time may increase significantly. Additionally, be aware that a large number of requests may be sent to the external cluster's API server, so consider API server load balancing and rate limiting.
 
 ## 謝辞
 
