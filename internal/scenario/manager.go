@@ -225,6 +225,29 @@ func (m *manager) processEvent(ctx context.Context, e event.Event) error {
 		return err
 	}
 	m.metricManager.Record(point)
+
+	gpuAllocations, err := m.resourceManager.GPUAllocations(ctx)
+	if err != nil {
+		return err
+	}
+	for _, allocation := range gpuAllocations {
+		points, err := metricpoint.NewGPUAllocationMetricPoints(
+			m.consts.UserID(),
+			m.consts.EvaluationID(),
+			m.metricManager.ScenarioID(),
+			m.metricManager.Iteration(),
+			allocation.NodeName,
+			allocation.Allocatable,
+			allocation.Allocated,
+			clock.VirtualTime(),
+		)
+		if err != nil {
+			return err
+		}
+		for _, point := range points {
+			m.metricManager.Record(point)
+		}
+	}
 	slog.InfoContext(
 		ctx, "found running pods and pending pods",
 		"running pods count", len(runningPods),

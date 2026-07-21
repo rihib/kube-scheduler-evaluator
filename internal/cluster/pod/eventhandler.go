@@ -171,7 +171,7 @@ func handleVirtualDeletedAt(
 		"virtualDeletedAt", virtualDeletedAt,
 	)
 	if exist := scheduledAtMap.delete(util.ResourceKeyOf(pod)); !exist {
-		slog.WarnContext(
+		slog.DebugContext(
 			ctx, "pod.handleVirtualDeletedAt: pod not found in scheduledAtMap",
 			"pod", util.ResourceKeyOf(pod),
 		)

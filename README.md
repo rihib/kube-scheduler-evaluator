@@ -17,6 +17,23 @@ It primarily has the following features:
   - Robust operation achieved through API server load mitigation and internal instability absorption
   - Sequential processing of node/job creation/deletion events via channels reduces memory usage
 
+## GPU allocation metrics
+
+After every scenario event and scheduler stabilization, the evaluator records
+cluster-level and per-node GPU allocation metrics. The values are based on
+`nvidia.com/gpu` Pod requests and node allocatable capacity, and their samples
+use virtual time as the time-series timestamp.
+
+The exported metrics are `gpu_allocatable_gpus`, `gpu_allocated_gpus`,
+`gpu_free_gpus`, and `gpu_allocation_percent`. All carry `user_id`,
+`evaluation_id`, `scenario_id`, `iteration`, `scope`, and `node` labels. For
+cluster-level samples, `scope` is `cluster` and `node` is empty; for per-node
+samples, `scope` is `node`.
+
+These metrics describe scheduler allocation rather than physical GPU activity.
+They are suitable for evaluating placement and fragmentation, while actual
+device utilization requires a separate runtime telemetry source.
+
 ## Architecture
 
 ![architecture](./docs/images/architecture.png)

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -71,26 +72,30 @@ func (p *PodCountMetricPoint) Name() string {
 }
 
 func (p *PodCountMetricPoint) ToJSONLine() (string, error) {
-	data := jsonlData{
-		Metric: metricMetadata{
-			Name: metricNameOf(p.Name(), "", podCountUnit),
-			Labels: map[string]string{
-				"user_id":       p.userID,
-				"evaluation_id": p.evaluationID,
-				"scenario_id":   p.scenarioID,
-				"iteration":     strconv.Itoa(p.iteration),
+	var lines []string
+	for phase, count := range map[string]int{
+		"running": p.runningCount,
+		"pending": p.pendingCount,
+	} {
+		data := jsonlData{
+			Metric: metricMetadata{
+				Name: metricNameOf(p.Name(), "", podCountUnit),
+				Labels: map[string]string{
+					"user_id":       p.userID,
+					"evaluation_id": p.evaluationID,
+					"scenario_id":   p.scenarioID,
+					"iteration":     strconv.Itoa(p.iteration),
+					"phase":         phase,
+				},
 			},
-		},
-		Values: []float64{
-			float64(p.virtualTime.UnixMilli()),
-			float64(p.runningCount),
-			float64(p.pendingCount),
-		},
-		Timestamps: []int64{p.realTime.UnixMilli()},
+			Values:     []float64{float64(count)},
+			Timestamps: []int64{p.virtualTime.UnixMilli()},
+		}
+		line, err := json.Marshal(data)
+		if err != nil {
+			return "", err
+		}
+		lines = append(lines, string(line))
 	}
-	line, err := json.Marshal(data)
-	if err != nil {
-		return "", err
-	}
-	return string(line), nil
+	return strings.Join(lines, "\n"), nil
 }
