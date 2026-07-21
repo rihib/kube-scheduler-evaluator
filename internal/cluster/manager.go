@@ -36,6 +36,8 @@ type Manager interface {
 	WaitForScheduler(context.Context) error
 	DeletionCandidatesOf(context.Context, time.Time) ([]*pod.DeletionCandidate, error)
 	ListPodsByPhase(corev1.PodPhase) ([]*corev1.Pod, error)
+	ListPodsDirect(context.Context) ([]*corev1.Pod, error)
+	ListNodesDirect(context.Context) ([]*corev1.Node, error)
 	LengthOfPodsWithDeletedOwner() int
 	IsAnyPodsRemaining() (bool, error)
 	IsAnyScheduledAtRemaining(context.Context) bool
@@ -300,6 +302,35 @@ func (m *manager) DeletionCandidatesOf(
 
 func (m *manager) ListPodsByPhase(phase corev1.PodPhase) ([]*corev1.Pod, error) {
 	return m.podManager.ListPodsByPhase(phase)
+}
+
+// ListPodsDirect lists pods directly from the API client instead of the
+// informer cache. Metrics computed from it are not affected by informer
+// cache lag (e.g. counting a pod that has already been deleted).
+func (m *manager) ListPodsDirect(ctx context.Context) ([]*corev1.Pod, error) {
+	podList, err := m.client.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("cluster.ListPodsDirect: %w", err)
+	}
+	pods := make([]*corev1.Pod, 0, len(podList.Items))
+	for i := range podList.Items {
+		pods = append(pods, &podList.Items[i])
+	}
+	return pods, nil
+}
+
+// ListNodesDirect lists nodes directly from the API client instead of the
+// informer cache, for the same reason as ListPodsDirect.
+func (m *manager) ListNodesDirect(ctx context.Context) ([]*corev1.Node, error) {
+	nodeList, err := m.client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("cluster.ListNodesDirect: %w", err)
+	}
+	nodes := make([]*corev1.Node, 0, len(nodeList.Items))
+	for i := range nodeList.Items {
+		nodes = append(nodes, &nodeList.Items[i])
+	}
+	return nodes, nil
 }
 
 func (m *manager) LengthOfPodsWithDeletedOwner() int {

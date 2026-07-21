@@ -231,7 +231,90 @@ func (m *manager) processEvent(ctx context.Context, e event.Event) error {
 		"pending pods count", len(pendingPods),
 	)
 
+	if err := m.recordGPUMetrics(ctx, now); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+func (m *manager) recordGPUMetrics(
+	ctx context.Context,
+	now time.Time,
+) error {
+	// List directly from the API client rather than the informer cache so
+	// that rapid create/delete sequences do not produce transient over- or
+	// undercounts from cache lag.
+	nodes, err := m.resourceManager.ListNodesDirect(ctx)
+	if err != nil {
+		return err
+	}
+	var capacity int64
+	for _, node := range nodes {
+		if q, ok := node.Status.Allocatable[definition.GPUResourceName]; ok {
+			capacity += q.Value()
+		}
+	}
+	pods, err := m.resourceManager.ListPodsDirect(ctx)
+	if err != nil {
+		return err
+	}
+	var runningPods, pendingPods []*corev1.Pod
+	for _, pod := range pods {
+		switch pod.Status.Phase {
+		case corev1.PodRunning:
+			runningPods = append(runningPods, pod)
+		case corev1.PodPending:
+			pendingPods = append(pendingPods, pod)
+		}
+	}
+	allocated := totalGPURequestsOf(runningPods)
+	pending := totalGPURequestsOf(pendingPods)
+	utilization := 0.0
+	if capacity > 0 {
+		utilization = float64(allocated) / float64(capacity) * 100
+	}
+	for kind, value := range map[metricpoint.GPUMetricKind]float64{
+		metricpoint.GPUCapacity:    float64(capacity),
+		metricpoint.GPUAllocated:   float64(allocated),
+		metricpoint.GPUPending:     float64(pending),
+		metricpoint.GPUUtilization: utilization,
+	} {
+		point, err := metricpoint.NewGPUMetricPoint(
+			kind,
+			value,
+			m.consts.UserID(),
+			m.consts.EvaluationID(),
+			m.metricManager.ScenarioID(),
+			m.metricManager.Iteration(),
+			clock.VirtualTime(),
+			now,
+		)
+		if err != nil {
+			return err
+		}
+		m.metricManager.Record(point)
+	}
+	slog.InfoContext(
+		ctx, "recorded gpu metrics",
+		"capacity", capacity,
+		"allocated", allocated,
+		"pending", pending,
+		"utilization", utilization,
+	)
+	return nil
+}
+
+func totalGPURequestsOf(pods []*corev1.Pod) int64 {
+	var total int64
+	for _, pod := range pods {
+		for _, container := range pod.Spec.Containers {
+			if q, ok := container.Resources.Requests[definition.GPUResourceName]; ok {
+				total += q.Value()
+			}
+		}
+	}
+	return total
 }
 
 func (m *manager) allocateDefinitionID() int {
