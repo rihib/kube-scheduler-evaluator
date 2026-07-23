@@ -70,20 +70,19 @@ dashboard (`config/grafana/dashboards/json/gpu-binpacking-demo.json`).
 
 - Docker (docker compose)
 - Go 1.24+
-- The reference implementation checked out as a git submodule:
+- Both repositories cloned side by side:
 
 ```bash
-git clone --recurse-submodules https://github.com/rihib/kube-scheduler-evaluator.git
-cd kube-scheduler-evaluator/kube-scheduler-evaluator-reference
-# or, in an existing clone:
-#   git submodule update --init
+git clone https://github.com/rihib/kube-scheduler-evaluator.git
+git clone https://github.com/rihib/kube-scheduler-evaluator-reference.git
+cd kube-scheduler-evaluator-reference
 ```
 
-The submodule's `go.mod` replaces the
-`github.com/pfnet/kube-scheduler-evaluator` dependency with the parent
-directory, so scheduler/metric changes made in this repository are picked up
-immediately by the demo — that is the point of the demo: edit, run, see the
-result in seconds.
+The reference's `go.mod` replaces the
+`github.com/pfnet/kube-scheduler-evaluator` dependency with the sibling
+`../kube-scheduler-evaluator` directory, so scheduler/metric changes made in
+this repository are picked up immediately by the demo — that is the point of
+the demo: edit, run, see the result in seconds.
 
 ## Running the demo
 

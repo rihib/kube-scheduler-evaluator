@@ -25,11 +25,12 @@ kube-scheduler-evaluator emulates controllers internally, enabling evaluations t
 
 ## Quick Start
 
-[kube-scheduler-evaluator-reference](https://github.com/pfnet/kube-scheduler-evaluator-reference) enables you to run reference scenarios locally using kube-scheduler-evaluator and docker-compose. It is checked out as a git submodule of this repository:
+[kube-scheduler-evaluator-reference](https://github.com/pfnet/kube-scheduler-evaluator-reference) enables you to run reference scenarios locally using kube-scheduler-evaluator and docker-compose. Clone it side by side with this repository (its `go.mod` resolves this module from `../kube-scheduler-evaluator`):
 
 ```bash
-git clone --recurse-submodules https://github.com/rihib/kube-scheduler-evaluator.git
-cd kube-scheduler-evaluator/kube-scheduler-evaluator-reference
+git clone https://github.com/rihib/kube-scheduler-evaluator.git
+git clone https://github.com/rihib/kube-scheduler-evaluator-reference.git
+cd kube-scheduler-evaluator-reference
 make       # Up and run evaluation
 make open  # Grafana dashboard
 ```

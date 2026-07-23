@@ -1,3 +1,0 @@
-[submodule "kube-scheduler-evaluator-reference"]
-	path = kube-scheduler-evaluator-reference
-	url = https://github.com/rihib/kube-scheduler-evaluator-reference.git
