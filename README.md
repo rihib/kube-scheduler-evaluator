@@ -25,7 +25,17 @@ kube-scheduler-evaluator emulates controllers internally, enabling evaluations t
 
 ## Quick Start
 
-[kube-scheduler-evaluator-reference](https://github.com/pfnet/kube-scheduler-evaluator-reference) enables you to run reference scenarios locally using kube-scheduler-evaluator and docker-compose.
+[kube-scheduler-evaluator-reference](https://github.com/pfnet/kube-scheduler-evaluator-reference) enables you to run reference scenarios locally using kube-scheduler-evaluator and docker-compose. Clone it side by side with this repository (its `go.mod` resolves this module from `../kube-scheduler-evaluator`):
+
+```bash
+git clone https://github.com/rihib/kube-scheduler-evaluator.git
+git clone https://github.com/rihib/kube-scheduler-evaluator-reference.git
+cd kube-scheduler-evaluator-reference
+make       # Up and run evaluation
+make open  # Grafana dashboard
+```
+
+For a guided example that develops, evaluates, and improves a GPU bin-packing scheduler plugin — including the `gpu_*` metrics (GPU capacity / allocated / pending / utilization) and a Grafana dashboard — see [docs/kubecon-demo.md](./docs/kubecon-demo.md).
 
 ## How to Use
 
