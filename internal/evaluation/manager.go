@@ -51,6 +51,8 @@ func (m *manager) Run(ctx context.Context) error {
 			ctx = util.WithLogAttrs(ctx, "iteration", i)
 			m.metricManager.SetIteration(i)
 			clock.SetVirtualTime(m.consts.StartedAt())
+			scenarioWallStartedAt := time.Now()
+			scenarioVirtualStartedAt := clock.VirtualTime()
 
 			startPoint, err := metricpoint.NewVirtualTimeMetricPoint(
 				metricpoint.VirtualCreatedAt,
@@ -102,6 +104,21 @@ func (m *manager) Run(ctx context.Context) error {
 				return err
 			}
 			m.metricManager.Record(endPoint)
+			summaryPoints, err := metricpoint.NewScenarioSummaryMetricPoints(
+				m.consts.UserID(),
+				m.consts.EvaluationID(),
+				m.metricManager.ScenarioID(),
+				m.metricManager.Iteration(),
+				time.Since(scenarioWallStartedAt),
+				clock.VirtualTime().Sub(scenarioVirtualStartedAt),
+				clock.VirtualTime(),
+			)
+			if err != nil {
+				return err
+			}
+			for _, point := range summaryPoints {
+				m.metricManager.Record(point)
+			}
 			slog.DebugContext(
 				ctx, "recorded virtual scenario end time",
 				"scenarioID", m.metricManager.ScenarioID(),

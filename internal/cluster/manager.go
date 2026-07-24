@@ -35,6 +35,7 @@ type Manager interface {
 	ProcessEvent(context.Context, event.Event) error
 	WaitForScheduler(context.Context) error
 	DeletionCandidatesOf(context.Context, time.Time) ([]*pod.DeletionCandidate, error)
+	ListNodes(context.Context) ([]*corev1.Node, error)
 	ListPodsByPhase(corev1.PodPhase) ([]*corev1.Pod, error)
 	LengthOfPodsWithDeletedOwner() int
 	IsAnyPodsRemaining() (bool, error)
@@ -282,7 +283,11 @@ func (m *manager) DeletionCandidatesOf(
 	asOfTime time.Time,
 ) ([]*pod.DeletionCandidate, error) {
 	var pods []*pod.DeletionCandidate
-	if err := util.WithRetry(ctx, "cluster.DeletionCandidatesOf", 3, 15*time.Second, func() error {
+	backoff := 15 * time.Second
+	if !m.consts.IsExternalMode() {
+		backoff = 100 * time.Millisecond
+	}
+	if err := util.WithRetry(ctx, "cluster.DeletionCandidatesOf", 3, backoff, func() error {
 		var err error
 		pods, err = m.podManager.DeletionCandidatesOf(ctx, asOfTime)
 		return err
@@ -296,6 +301,18 @@ func (m *manager) DeletionCandidatesOf(
 		)
 	}
 	return pods, nil
+}
+
+func (m *manager) ListNodes(ctx context.Context) ([]*corev1.Node, error) {
+	nodeList, err := m.client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("cluster.ListNodes: %w", err)
+	}
+	nodes := make([]*corev1.Node, 0, len(nodeList.Items))
+	for i := range nodeList.Items {
+		nodes = append(nodes, &nodeList.Items[i])
+	}
+	return nodes, nil
 }
 
 func (m *manager) ListPodsByPhase(phase corev1.PodPhase) ([]*corev1.Pod, error) {
