@@ -231,16 +231,8 @@ func (m *manager) WaitForScheduler(ctx context.Context) error {
 	}
 	pendingPods := make(map[string]struct{})
 	for _, pod := range podList.Items {
-		if pod.Status.Phase != corev1.PodPending {
+		if !podNeedsSchedulingResult(&pod) {
 			continue
-		}
-		// Skip pods that are already marked as Unschedulable
-		for _, cond := range pod.Status.Conditions {
-			if cond.Type == corev1.PodScheduled &&
-				cond.Status == corev1.ConditionFalse &&
-				cond.Reason == corev1.PodReasonUnschedulable {
-				continue
-			}
 		}
 		slog.DebugContext(ctx, "pending pod candidate", "name", pod.Name)
 		pendingPods[pod.Name] = struct{}{}
@@ -276,6 +268,20 @@ func (m *manager) WaitForScheduler(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
+}
+
+func podNeedsSchedulingResult(pod *corev1.Pod) bool {
+	if pod.Status.Phase != corev1.PodPending {
+		return false
+	}
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodScheduled &&
+			condition.Status == corev1.ConditionFalse &&
+			condition.Reason == corev1.PodReasonUnschedulable {
+			return false
+		}
+	}
+	return true
 }
 
 func (m *manager) DeletionCandidatesOf(
