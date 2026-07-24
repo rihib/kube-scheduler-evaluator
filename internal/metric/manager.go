@@ -26,7 +26,10 @@ type Manager interface {
 }
 
 func NewManager(c consts.Consts) (Manager, error) {
-	batchSize := 50
+	// Large scenarios can produce tens of thousands of samples in a few
+	// seconds. Keep HTTP overhead low enough that metric export does not become
+	// the bottleneck being measured.
+	batchSize := 1000
 	metricCh := make(chan metricpoint.MetricPoint, batchSize*10)
 	storeInfos := c.MetricStores()
 	var stores []metricstore.Manager

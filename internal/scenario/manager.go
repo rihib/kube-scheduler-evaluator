@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"strconv"
 	"time"
 
 	"github.com/pfnet/kube-scheduler-evaluator/internal/clock"
@@ -16,6 +17,7 @@ import (
 	"github.com/pfnet/kube-scheduler-evaluator/internal/util"
 	"github.com/pfnet/kube-scheduler-evaluator/pkg/definition"
 	corev1 "k8s.io/api/core/v1"
+	apiruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/kubernetes/pkg/scheduler"
 	"k8s.io/kubernetes/pkg/scheduler/framework/runtime"
 )
@@ -52,7 +54,13 @@ type manager struct {
 	nextRelativeTime    time.Duration
 	schedulerRegistry   runtime.Registry
 	schedulerOptions    []scheduler.Option
+	nodeCount           int
+	cpuAllocatableMilli int64
+	gpuAllocatable      int64
+	eventsSinceSnapshot int
 }
+
+const clusterSnapshotEveryEvents = 25
 
 type nextEventDefinitionFn func(context.Context) <-chan definition.Event
 
@@ -68,10 +76,17 @@ func (m *manager) Run(ctx context.Context) error {
 			return err
 		}
 	}
+	if err := m.initializeClusterCapacity(ctx); err != nil {
+		return err
+	}
 
 	ch := m.nextEventDefinition(ctx)
 	var i int
-	retryCount, maxRetry, backoff := 0, 3, 15*time.Second
+	initialBackoff := 15 * time.Second
+	if !m.consts.IsExternalMode() {
+		initialBackoff = 100 * time.Millisecond
+	}
+	retryCount, maxRetry, backoff := 0, 3, initialBackoff
 	for {
 		slog.DebugContext(ctx, fmt.Sprintf("next scenario loop %d", i))
 		i++
@@ -85,7 +100,7 @@ func (m *manager) Run(ctx context.Context) error {
 			}
 			if deleteEvent != nil {
 				slog.DebugContext(ctx, "there is a delete event before user defined event")
-				retryCount, maxRetry, backoff = 0, 3, 15*time.Second // reset when making progress
+				retryCount, maxRetry, backoff = 0, 3, initialBackoff // reset when making progress
 				if err := m.processEvent(ctx, deleteEvent); err != nil {
 					return err
 				}
@@ -201,6 +216,9 @@ func (m *manager) processEvent(ctx context.Context, e event.Event) error {
 	if err := m.resourceManager.WaitForScheduler(ctx); err != nil {
 		return err
 	}
+	if err := m.updateClusterCapacity(e); err != nil {
+		return err
+	}
 
 	runningPods, err := m.resourceManager.ListPodsByPhase(corev1.PodRunning)
 	if err != nil {
@@ -210,21 +228,32 @@ func (m *manager) processEvent(ctx context.Context, e event.Event) error {
 	if err != nil {
 		return err
 	}
-	now := time.Now()
-	point, err := metricpoint.NewPodCountMetricPoint(
+	m.eventsSinceSnapshot++
+	isFinalPodDeletion := e.EventType() == definition.EventTypeDelete &&
+		e.UnstructuredObject().GetKind() == "Pod" &&
+		len(runningPods) == 0 && len(pendingPods) == 0
+	if m.eventsSinceSnapshot < clusterSnapshotEveryEvents && !isFinalPodDeletion {
+		return nil
+	}
+	m.eventsSinceSnapshot = 0
+	cpuRequestedMilli, gpuRequested, gpuRequestedMilli := requestedResources(
+		runningPods,
 		m.consts.UserID(),
-		m.consts.EvaluationID(),
-		m.metricManager.ScenarioID(),
-		m.metricManager.Iteration(),
-		len(runningPods),
-		len(pendingPods),
-		clock.VirtualTime(),
-		now,
+	)
+	points, err := metricpoint.NewClusterSnapshotMetricPoints(
+		m.consts.UserID(), m.consts.EvaluationID(),
+		m.metricManager.ScenarioID(), m.metricManager.Iteration(),
+		m.nodeCount, len(runningPods), len(pendingPods),
+		m.cpuAllocatableMilli, cpuRequestedMilli,
+		m.gpuAllocatable, gpuRequested, gpuRequestedMilli,
+		time.Now(),
 	)
 	if err != nil {
 		return err
 	}
-	m.metricManager.Record(point)
+	for _, point := range points {
+		m.metricManager.Record(point)
+	}
 	slog.InfoContext(
 		ctx, "found running pods and pending pods",
 		"running pods count", len(runningPods),
@@ -232,6 +261,79 @@ func (m *manager) processEvent(ctx context.Context, e event.Event) error {
 	)
 
 	return nil
+}
+
+func (m *manager) initializeClusterCapacity(ctx context.Context) error {
+	nodes, err := m.resourceManager.ListNodes(ctx)
+	if err != nil {
+		return err
+	}
+	m.nodeCount = len(nodes)
+	for _, node := range nodes {
+		cpu, gpu := nodeCapacity(node)
+		m.cpuAllocatableMilli += cpu
+		m.gpuAllocatable += gpu
+	}
+	return nil
+}
+
+func (m *manager) updateClusterCapacity(e event.Event) error {
+	obj := e.UnstructuredObject()
+	if obj.GetKind() != "Node" {
+		return nil
+	}
+	var node corev1.Node
+	if err := apiruntime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, &node); err != nil {
+		return fmt.Errorf("scenario.updateClusterCapacity: %w", err)
+	}
+	cpu, gpu := nodeCapacity(&node)
+	switch e.EventType() {
+	case definition.EventTypeCreate:
+		m.nodeCount++
+		m.cpuAllocatableMilli += cpu
+		m.gpuAllocatable += gpu
+	case definition.EventTypeDelete:
+		m.nodeCount--
+		m.cpuAllocatableMilli -= cpu
+		m.gpuAllocatable -= gpu
+	}
+	return nil
+}
+
+func nodeCapacity(node *corev1.Node) (cpuMilli, gpu int64) {
+	cpu := node.Status.Allocatable.Cpu()
+	if cpu != nil {
+		cpuMilli = cpu.MilliValue()
+	}
+	gpuQuantity, ok := node.Status.Allocatable[corev1.ResourceName("nvidia.com/gpu")]
+	if ok {
+		gpu = gpuQuantity.Value()
+	}
+	return cpuMilli, gpu
+}
+
+func requestedResources(pods []*corev1.Pod, userID string) (cpuMilli, gpu, gpuMilli int64) {
+	gpuMilliAnnotationKey := fmt.Sprintf("%s/gpu-milli", userID)
+	for _, pod := range pods {
+		var podCPU, podGPU int64
+		for _, container := range pod.Spec.Containers {
+			podCPU += container.Resources.Requests.Cpu().MilliValue()
+			gpuQuantity, ok := container.Resources.Requests[corev1.ResourceName("nvidia.com/gpu")]
+			if ok {
+				podGPU += gpuQuantity.Value()
+			}
+		}
+		cpuMilli += podCPU
+		gpu += podGPU
+		podGPUMilli := podGPU * 1000
+		if raw, ok := pod.Annotations[gpuMilliAnnotationKey]; ok && podGPU > 0 {
+			if requestedMilli, err := strconv.ParseInt(raw, 10, 64); err == nil {
+				podGPUMilli = podGPU * requestedMilli
+			}
+		}
+		gpuMilli += podGPUMilli
+	}
+	return cpuMilli, gpu, gpuMilli
 }
 
 func (m *manager) allocateDefinitionID() int {
