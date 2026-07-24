@@ -17,6 +17,8 @@ type metricUnitType int
 const (
 	podCountUnit metricUnitType = iota
 	milisecondsUnit
+	gpuUnit
+	percentUnit
 )
 
 func (t metricUnitType) String() string {
@@ -25,6 +27,10 @@ func (t metricUnitType) String() string {
 		return "pods"
 	case milisecondsUnit:
 		return "miliseconds"
+	case gpuUnit:
+		return "gpus"
+	case percentUnit:
+		return "percent"
 	default:
 		return "unknown"
 	}

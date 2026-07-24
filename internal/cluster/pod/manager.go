@@ -30,8 +30,10 @@ type PodManager interface {
 	DeletionCandidatesOf(context.Context, time.Time) ([]*DeletionCandidate, error)
 	SetPodWithDeletedOwner(*util.ResourceKey)
 	PodHasDeletedOwner(*util.ResourceKey) bool
+	PodDeletionIsPending(*util.ResourceKey) bool
 	LengthOfPodsWithDeletedOwner() int
 	IsAnyScheduledAtRemaining(ctx context.Context) bool
+	ForgetScheduledAt(*util.ResourceKey)
 }
 
 func NewPodManager(
@@ -43,9 +45,11 @@ func NewPodManager(
 	podInformer := informerFactory.Core().V1().Pods().Informer()
 	podActivityCh := make(chan struct{}, 1)
 	scheduledAtMap := newScheduledAtMapper()
+	recentlyDeletedPods := &sync.Map{}
 	podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
 			pod, _ := obj.(*corev1.Pod)
+			recentlyDeletedPods.Delete(util.ResourceKeyOf(pod).String())
 			handleVirtualCreatedAt(ctx, pod, c, metricManager)
 			select {
 			case podActivityCh <- struct{}{}:
@@ -118,6 +122,7 @@ func NewPodManager(
 		podActivityCh:        podActivityCh,
 		scheduledAtMap:       scheduledAtMap,
 		podsWithDeletedOwner: sets.New[string](),
+		recentlyDeletedPods:  recentlyDeletedPods,
 	}, nil
 }
 
@@ -128,6 +133,7 @@ type podManager struct {
 	podActivityCh        chan struct{}
 	scheduledAtMap       *scheduledAtMapper
 	podsWithDeletedOwner sets.Set[string]
+	recentlyDeletedPods  *sync.Map
 }
 
 func (pm *podManager) WaitForPodActivityStable(ctx context.Context) error {
@@ -196,6 +202,9 @@ func (pm *podManager) DeletionCandidatesOf(
 	}
 	var errs []error
 	for _, pod := range runningPods {
+		if pm.PodDeletionIsPending(util.ResourceKeyOf(pod)) {
+			continue
+		}
 		if pm.PodHasDeletedOwner(util.ResourceKeyOf(pod)) {
 			slog.DebugContext(
 				ctx, "skipping pod with deleted owner",
@@ -314,6 +323,11 @@ func (pm *podManager) PodHasDeletedOwner(podKey *util.ResourceKey) bool {
 	return true
 }
 
+func (pm *podManager) PodDeletionIsPending(podKey *util.ResourceKey) bool {
+	_, ok := pm.recentlyDeletedPods.Load(podKey.String())
+	return ok
+}
+
 func (pm *podManager) LengthOfPodsWithDeletedOwner() int {
 	return pm.podsWithDeletedOwner.Len()
 }
@@ -335,6 +349,15 @@ func (pm *podManager) IsAnyScheduledAtRemaining(ctx context.Context) bool {
 		}
 	}
 	return false
+}
+
+// ForgetScheduledAt removes scheduler bookkeeping immediately after a
+// successful API deletion. Informer delete delivery is asynchronous, so
+// waiting for the handler alone can make the same Pod appear as the next
+// virtual deletion candidate multiple times in fast in-memory evaluations.
+func (pm *podManager) ForgetScheduledAt(podKey *util.ResourceKey) {
+	pm.recentlyDeletedPods.Store(podKey.String(), struct{}{})
+	pm.scheduledAtMap.delete(podKey)
 }
 
 type scheduledAtMapper struct {

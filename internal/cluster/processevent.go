@@ -119,6 +119,9 @@ func (m *manager) ProcessEvent(ctx context.Context, e event.Event) error {
 					util.ResourceKeyOf(obj).String(), err,
 				)
 			}
+			if obj.GetKind() == "Pod" {
+				m.podManager.ForgetScheduledAt(util.ResourceKeyOf(obj))
+			}
 			slog.InfoContext(
 				ctx, "deleted object which is not a pod or has no owner",
 				"eventType", e.EventType(),
@@ -192,6 +195,7 @@ func (m *manager) ProcessEvent(ctx context.Context, e event.Event) error {
 				util.ResourceKeyOf(obj).String(), err,
 			)
 		}
+		m.podManager.ForgetScheduledAt(util.ResourceKeyOf(obj))
 		slog.InfoContext(
 			ctx, "deleted owner and pod",
 			"eventType", e.EventType(),

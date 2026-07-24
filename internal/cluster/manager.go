@@ -36,6 +36,7 @@ type Manager interface {
 	WaitForScheduler(context.Context) error
 	DeletionCandidatesOf(context.Context, time.Time) ([]*pod.DeletionCandidate, error)
 	ListPodsByPhase(corev1.PodPhase) ([]*corev1.Pod, error)
+	GPUAllocation(context.Context) (GPUAllocation, error)
 	LengthOfPodsWithDeletedOwner() int
 	IsAnyPodsRemaining() (bool, error)
 	IsAnyScheduledAtRemaining(context.Context) bool
@@ -230,16 +231,8 @@ func (m *manager) WaitForScheduler(ctx context.Context) error {
 	}
 	pendingPods := make(map[string]struct{})
 	for _, pod := range podList.Items {
-		if pod.Status.Phase != corev1.PodPending {
+		if !podNeedsSchedulingResult(&pod) {
 			continue
-		}
-		// Skip pods that are already marked as Unschedulable
-		for _, cond := range pod.Status.Conditions {
-			if cond.Type == corev1.PodScheduled &&
-				cond.Status == corev1.ConditionFalse &&
-				cond.Reason == corev1.PodReasonUnschedulable {
-				continue
-			}
 		}
 		slog.DebugContext(ctx, "pending pod candidate", "name", pod.Name)
 		pendingPods[pod.Name] = struct{}{}
@@ -277,6 +270,20 @@ func (m *manager) WaitForScheduler(ctx context.Context) error {
 	}
 }
 
+func podNeedsSchedulingResult(pod *corev1.Pod) bool {
+	if pod.Status.Phase != corev1.PodPending {
+		return false
+	}
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodScheduled &&
+			condition.Status == corev1.ConditionFalse &&
+			condition.Reason == corev1.PodReasonUnschedulable {
+			return false
+		}
+	}
+	return true
+}
+
 func (m *manager) DeletionCandidatesOf(
 	ctx context.Context,
 	asOfTime time.Time,
@@ -312,6 +319,9 @@ func (m *manager) IsAnyPodsRemaining() (bool, error) {
 		return false, err
 	}
 	for _, pod := range pendingPods {
+		if m.podManager.PodDeletionIsPending(util.ResourceKeyOf(pod)) {
+			continue
+		}
 		if !m.podManager.PodHasDeletedOwner(util.ResourceKeyOf(pod)) {
 			return true, nil
 		}
@@ -321,6 +331,9 @@ func (m *manager) IsAnyPodsRemaining() (bool, error) {
 		return false, err
 	}
 	for _, pod := range runningPods {
+		if m.podManager.PodDeletionIsPending(util.ResourceKeyOf(pod)) {
+			continue
+		}
 		if !m.podManager.PodHasDeletedOwner(util.ResourceKeyOf(pod)) {
 			return true, nil
 		}
@@ -330,6 +343,9 @@ func (m *manager) IsAnyPodsRemaining() (bool, error) {
 		return false, err
 	}
 	for _, pod := range unknownPods {
+		if m.podManager.PodDeletionIsPending(util.ResourceKeyOf(pod)) {
+			continue
+		}
 		if !m.podManager.PodHasDeletedOwner(util.ResourceKeyOf(pod)) {
 			return true, nil
 		}
