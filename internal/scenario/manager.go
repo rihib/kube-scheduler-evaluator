@@ -15,7 +15,10 @@ import (
 	metricpoint "github.com/pfnet/kube-scheduler-evaluator/internal/metric/point"
 	"github.com/pfnet/kube-scheduler-evaluator/internal/util"
 	"github.com/pfnet/kube-scheduler-evaluator/pkg/definition"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	resourcehelper "k8s.io/component-helpers/resource"
 	"k8s.io/kubernetes/pkg/scheduler"
 	"k8s.io/kubernetes/pkg/scheduler/framework/runtime"
 )
@@ -52,6 +55,13 @@ type manager struct {
 	nextRelativeTime    time.Duration
 	schedulerRegistry   runtime.Registry
 	schedulerOptions    []scheduler.Option
+	hasGPUStats         bool
+	gpuStartedAt        time.Time
+	gpuLastObservedAt   time.Time
+	gpuLastPercent      float64
+	gpuWeightedSeconds  float64
+	hasRecordedGPU      bool
+	lastRecordedGPU     cluster.GPUAllocation
 }
 
 type nextEventDefinitionFn func(context.Context) <-chan definition.Event
@@ -118,6 +128,9 @@ func (m *manager) Run(ctx context.Context) error {
 					slog.InfoContext(ctx, "no pods with deleted owner remaining")
 				} else {
 					slog.WarnContext(ctx, "podsWithDeletedOwner remaining", "count", count)
+				}
+				if err := m.recordGPUAverage(); err != nil {
+					return err
 				}
 				return nil
 			}
@@ -226,26 +239,13 @@ func (m *manager) processEvent(ctx context.Context, e event.Event) error {
 	}
 	m.metricManager.Record(point)
 
-	gpuAllocations, err := m.resourceManager.GPUAllocations(ctx)
+	usesGPU, err := eventRequestsGPU(e)
 	if err != nil {
 		return err
 	}
-	for _, allocation := range gpuAllocations {
-		points, err := metricpoint.NewGPUAllocationMetricPoints(
-			m.consts.UserID(),
-			m.consts.EvaluationID(),
-			m.metricManager.ScenarioID(),
-			m.metricManager.Iteration(),
-			allocation.NodeName,
-			allocation.Allocatable,
-			allocation.Allocated,
-			clock.VirtualTime(),
-		)
-		if err != nil {
+	if usesGPU {
+		if err := m.recordGPUAllocation(ctx, clock.VirtualTime()); err != nil {
 			return err
-		}
-		for _, point := range points {
-			m.metricManager.Record(point)
 		}
 	}
 	slog.InfoContext(
@@ -254,6 +254,106 @@ func (m *manager) processEvent(ctx context.Context, e event.Event) error {
 		"pending pods count", len(pendingPods),
 	)
 
+	return nil
+}
+
+var gpuResourceName = corev1.ResourceName("nvidia.com/gpu")
+
+func eventRequestsGPU(e event.Event) (bool, error) {
+	obj := e.UnstructuredObject()
+	if obj == nil {
+		return false, nil
+	}
+	var pod corev1.Pod
+	switch obj.GetKind() {
+	case "Pod":
+		if err := k8sruntime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, &pod); err != nil {
+			return false, fmt.Errorf("scenario.eventRequestsGPU: convert Pod: %w", err)
+		}
+	case "ReplicaSet":
+		var replicaSet appsv1.ReplicaSet
+		if err := k8sruntime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, &replicaSet); err != nil {
+			return false, fmt.Errorf("scenario.eventRequestsGPU: convert ReplicaSet: %w", err)
+		}
+		pod.Spec = replicaSet.Spec.Template.Spec
+	default:
+		return false, nil
+	}
+	requests := resourcehelper.PodRequests(&pod, resourcehelper.PodResourcesOptions{})
+	requestedGPU := requests[gpuResourceName]
+	return requestedGPU.Sign() > 0, nil
+}
+
+func (m *manager) recordGPUAllocation(ctx context.Context, virtualTime time.Time) error {
+	allocation, err := m.resourceManager.GPUAllocation(ctx)
+	if err != nil {
+		return err
+	}
+	percent := float64(0)
+	if allocation.Allocatable > 0 {
+		percent = float64(allocation.Allocated) / float64(allocation.Allocatable) * 100
+	}
+	if !m.hasGPUStats {
+		if allocation.Allocated == 0 {
+			return nil
+		}
+		m.hasGPUStats = true
+		m.gpuStartedAt = virtualTime
+		m.gpuLastObservedAt = virtualTime
+		m.gpuLastPercent = percent
+	} else {
+		elapsed := virtualTime.Sub(m.gpuLastObservedAt).Seconds()
+		if elapsed < 0 {
+			return fmt.Errorf("scenario.recordGPUAllocation: virtual time moved backwards")
+		}
+		m.gpuWeightedSeconds += m.gpuLastPercent * elapsed
+		m.gpuLastObservedAt = virtualTime
+		m.gpuLastPercent = percent
+	}
+
+	if m.hasRecordedGPU && m.lastRecordedGPU == allocation {
+		return nil
+	}
+	points, err := metricpoint.NewGPUAllocationMetricPoints(
+		m.consts.UserID(),
+		m.consts.EvaluationID(),
+		m.metricManager.ScenarioID(),
+		m.metricManager.Iteration(),
+		allocation.Allocatable,
+		allocation.Allocated,
+		virtualTime,
+	)
+	if err != nil {
+		return err
+	}
+	for _, point := range points {
+		m.metricManager.Record(point)
+	}
+	m.hasRecordedGPU = true
+	m.lastRecordedGPU = allocation
+	return nil
+}
+
+func (m *manager) recordGPUAverage() error {
+	if !m.hasGPUStats {
+		return nil
+	}
+	duration := m.gpuLastObservedAt.Sub(m.gpuStartedAt).Seconds()
+	if duration <= 0 {
+		return nil
+	}
+	point, err := metricpoint.NewGPUAverageAllocationMetricPoint(
+		m.consts.UserID(),
+		m.consts.EvaluationID(),
+		m.metricManager.ScenarioID(),
+		m.metricManager.Iteration(),
+		m.gpuWeightedSeconds/duration,
+		m.gpuLastObservedAt,
+	)
+	if err != nil {
+		return err
+	}
+	m.metricManager.Record(point)
 	return nil
 }
 

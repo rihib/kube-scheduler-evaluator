@@ -15,7 +15,6 @@ func NewGPUAllocationMetricPoints(
 	evaluationID string,
 	scenarioID string,
 	iteration int,
-	nodeName string,
 	allocatable int64,
 	allocated int64,
 	virtualTime time.Time,
@@ -44,11 +43,6 @@ func NewGPUAllocationMetricPoints(
 		"evaluation_id": evaluationID,
 		"scenario_id":   scenarioID,
 		"iteration":     strconv.Itoa(iteration),
-		"scope":         "cluster",
-		"node":          nodeName,
-	}
-	if nodeName != "" {
-		labels["scope"] = "node"
 	}
 	utilization := float64(0)
 	if allocatable > 0 {
@@ -60,6 +54,37 @@ func NewGPUAllocationMetricPoints(
 		newGPUAllocationMetricPoint("free", gpuUnit, float64(allocatable-allocated), labels, virtualTime),
 		newGPUAllocationMetricPoint("allocation", percentUnit, utilization, labels, virtualTime),
 	}, nil
+}
+
+// NewGPUAverageAllocationMetricPoint records a scenario's time-weighted
+// cluster GPU allocation average.
+func NewGPUAverageAllocationMetricPoint(
+	userID string,
+	evaluationID string,
+	scenarioID string,
+	iteration int,
+	average float64,
+	virtualTime time.Time,
+) (MetricPoint, error) {
+	if userID == "" || evaluationID == "" || scenarioID == "" {
+		return nil, fmt.Errorf("metricpoint.NewGPUAverageAllocationMetricPoint: metric labels are required")
+	}
+	if iteration < 0 {
+		return nil, fmt.Errorf("metricpoint.NewGPUAverageAllocationMetricPoint: iteration must be non-negative")
+	}
+	if average < 0 || average > 100 {
+		return nil, fmt.Errorf("metricpoint.NewGPUAverageAllocationMetricPoint: average must be between 0 and 100")
+	}
+	if virtualTime.IsZero() {
+		return nil, fmt.Errorf("metricpoint.NewGPUAverageAllocationMetricPoint: virtualTime is required")
+	}
+	labels := map[string]string{
+		"user_id":       userID,
+		"evaluation_id": evaluationID,
+		"scenario_id":   scenarioID,
+		"iteration":     strconv.Itoa(iteration),
+	}
+	return newGPUAllocationMetricPoint("average_allocation", percentUnit, average, labels, virtualTime), nil
 }
 
 func newGPUAllocationMetricPoint(kind string, unit metricUnitType, value float64, labels map[string]string, virtualTime time.Time) MetricPoint {

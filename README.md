@@ -19,16 +19,18 @@ It primarily has the following features:
 
 ## GPU allocation metrics
 
-After every scenario event and scheduler stabilization, the evaluator records
-cluster-level and per-node GPU allocation metrics. The values are based on
-`nvidia.com/gpu` Pod requests and node allocatable capacity, and their samples
-use virtual time as the time-series timestamp.
+After GPU workload events and scheduler stabilization, the evaluator records
+cluster-level GPU allocation metrics. The values are based on `nvidia.com/gpu`
+Pod requests and node allocatable capacity, and their samples use virtual time
+as the time-series timestamp. Unchanged allocation states are not emitted,
+which keeps large scenarios compact.
 
 The exported metrics are `gpu_allocatable_gpus`, `gpu_allocated_gpus`,
-`gpu_free_gpus`, and `gpu_allocation_percent`. All carry `user_id`,
-`evaluation_id`, `scenario_id`, `iteration`, `scope`, and `node` labels. For
-cluster-level samples, `scope` is `cluster` and `node` is empty; for per-node
-samples, `scope` is `node`.
+`gpu_free_gpus`, `gpu_allocation_percent`, and
+`gpu_average_allocation_percent`. The last metric is the time-weighted average
+from the first non-zero allocation through the final GPU workload completion.
+All metrics carry `user_id`, `evaluation_id`, `scenario_id`, and `iteration`
+labels.
 
 These metrics describe scheduler allocation rather than physical GPU activity.
 They are suitable for evaluating placement and fragmentation, while actual

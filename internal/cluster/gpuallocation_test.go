@@ -41,18 +41,9 @@ func TestCalculateGPUAllocations(t *testing.T) {
 		},
 	}
 
-	got := calculateGPUAllocations(nodes, pods)
-	want := []GPUAllocation{
-		{NodeName: "small", Allocatable: 1, Allocated: 0},
-		{NodeName: "large", Allocatable: 8, Allocated: 4},
-		{Allocatable: 9, Allocated: 4},
-	}
-	if len(got) != len(want) {
-		t.Fatalf("got %d allocations, want %d", len(got), len(want))
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("allocation %d = %+v, want %+v", i, got[i], want[i])
-		}
+	got := calculateGPUAllocation(nodes, pods)
+	want := GPUAllocation{Allocatable: 9, Allocated: 4}
+	if got != want {
+		t.Errorf("allocation = %+v, want %+v", got, want)
 	}
 }

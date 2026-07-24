@@ -36,7 +36,7 @@ type Manager interface {
 	WaitForScheduler(context.Context) error
 	DeletionCandidatesOf(context.Context, time.Time) ([]*pod.DeletionCandidate, error)
 	ListPodsByPhase(corev1.PodPhase) ([]*corev1.Pod, error)
-	GPUAllocations(context.Context) ([]GPUAllocation, error)
+	GPUAllocation(context.Context) (GPUAllocation, error)
 	LengthOfPodsWithDeletedOwner() int
 	IsAnyPodsRemaining() (bool, error)
 	IsAnyScheduledAtRemaining(context.Context) bool
