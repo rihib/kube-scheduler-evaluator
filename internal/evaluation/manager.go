@@ -111,7 +111,7 @@ func (m *manager) Run(ctx context.Context) error {
 				m.metricManager.Iteration(),
 				time.Since(scenarioWallStartedAt),
 				clock.VirtualTime().Sub(scenarioVirtualStartedAt),
-				time.Now(),
+				clock.VirtualTime(),
 			)
 			if err != nil {
 				return err

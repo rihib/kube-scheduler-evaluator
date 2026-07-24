@@ -246,7 +246,7 @@ func (m *manager) processEvent(ctx context.Context, e event.Event) error {
 		m.nodeCount, len(runningPods), len(pendingPods),
 		m.cpuAllocatableMilli, cpuRequestedMilli,
 		m.gpuAllocatable, gpuRequested, gpuRequestedMilli,
-		time.Now(),
+		clock.VirtualTime(),
 	)
 	if err != nil {
 		return err

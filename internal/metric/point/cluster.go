@@ -18,8 +18,10 @@ const (
 )
 
 // NewClusterSnapshotMetricPoints builds the aggregate cluster samples used by
-// the live demo dashboard. CPU and GPU utilization are request-based because
-// the evaluator simulates scheduling rather than workload execution.
+// the demo dashboard. timestamp is the evaluator's virtual time so that the
+// dashboard replays resource transitions on the scenario timeline. CPU and GPU
+// utilization are request-based because the evaluator simulates scheduling
+// rather than workload execution.
 func NewClusterSnapshotMetricPoints(
 	userID, evaluationID, scenarioID string,
 	iteration int,
