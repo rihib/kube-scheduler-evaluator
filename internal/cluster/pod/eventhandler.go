@@ -14,58 +14,28 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// The handlers in this file are used in external mode only.
+// A real cluster takes real time to react to an event, so the virtual time of a Pod transition
+// is the virtual time of the preceding event plus the real time elapsed since that event.
+// In internal mode, Recorder records the transitions instead.
+func externalVirtualTimeNow() (virtualTime, realTime time.Time) {
+	now := time.Now()
+	return clock.VirtualTime().Add(now.Sub(clock.UpdatedAt())), now
+}
+
 func handleVirtualCreatedAt(
 	ctx context.Context,
 	pod *corev1.Pod,
 	c consts.Consts,
 	metricManager metric.Manager,
 ) {
-	now := time.Now()
-	elapsedTime := now.Sub(clock.UpdatedAt())
-	virtualCreatedAt := clock.VirtualTime().Add(elapsedTime)
+	virtualCreatedAt, now := externalVirtualTimeNow()
 	slog.DebugContext(
 		ctx, "pod has been created",
 		"pod", util.ResourceKeyOf(pod),
 		"virtualCreatedAt", virtualCreatedAt,
 	)
-
-	ownerRef := metav1.GetControllerOf(pod)
-	ownerName := ""
-	ownerKind := metricpoint.NoOwnerKind
-	if ownerRef != nil {
-		ownerName = ownerRef.Name
-		ownerKind = metricpoint.KindTypeFromString(ownerRef.Kind)
-	}
-	point, err := metricpoint.NewVirtualTimeMetricPoint(
-		metricpoint.VirtualCreatedAt,
-		metricpoint.PodKind,
-		pod.Namespace,
-		pod.Name,
-		ownerKind,
-		ownerName,
-		c.UserID(),
-		c.EvaluationID(),
-		metricManager.ScenarioID(),
-		metricManager.Iteration(),
-		virtualCreatedAt,
-		now,
-	)
-	if err != nil {
-		slog.ErrorContext(
-			ctx, "pod.handleVirtualCreatedAt: failed to create metric point",
-			"pod", util.ResourceKeyOf(pod),
-			"ownerKind", ownerKind,
-			"ownerName", ownerName,
-			"error", err,
-		)
-		return
-	}
-	slog.DebugContext(
-		ctx, "pushing VirtualCreatedAt metric",
-		"pod", util.ResourceKeyOf(pod),
-		"virtualCreatedAt", virtualCreatedAt,
-	)
-	metricManager.Record(point)
+	recordPodVirtualTime(ctx, metricpoint.VirtualCreatedAt, pod, virtualCreatedAt, now, c, metricManager)
 }
 
 func handleVirtualScheduledAt(
@@ -85,11 +55,7 @@ func handleVirtualScheduledAt(
 	// The Pod's schedule is considered to be triggered by the preceding event.
 	// For example, a Pod might be created and scheduled by a create event,
 	// or another Pod might be scheduled onto a node which resources freed by a delete event.
-	// Therefore, detect when a Pod is scheduled and calculate virtualScheduledAt
-	// based on the elapsed time from current VirtualTime.
-	now := time.Now()
-	elapsedTime := now.Sub(clock.UpdatedAt())
-	virtualScheduledAt := clock.VirtualTime().Add(elapsedTime)
+	virtualScheduledAt, now := externalVirtualTimeNow()
 	slog.DebugContext(
 		ctx, "pod has been scheduled",
 		"pod", util.ResourceKeyOf(newPod),
@@ -102,44 +68,7 @@ func handleVirtualScheduledAt(
 			"pod", util.ResourceKeyOf(newPod),
 		)
 	}
-
-	ownerRef := metav1.GetControllerOf(newPod)
-	ownerName := ""
-	ownerKind := metricpoint.NoOwnerKind
-	if ownerRef != nil {
-		ownerName = ownerRef.Name
-		ownerKind = metricpoint.KindTypeFromString(ownerRef.Kind)
-	}
-	point, err := metricpoint.NewVirtualTimeMetricPoint(
-		metricpoint.VirtualScheduledAt,
-		metricpoint.PodKind,
-		newPod.Namespace,
-		newPod.Name,
-		ownerKind,
-		ownerName,
-		c.UserID(),
-		c.EvaluationID(),
-		metricManager.ScenarioID(),
-		metricManager.Iteration(),
-		virtualScheduledAt,
-		now,
-	)
-	if err != nil {
-		slog.ErrorContext(
-			ctx, "pod.handleVirtualScheduledAt: failed to create metric point",
-			"pod", util.ResourceKeyOf(newPod),
-			"ownerKind", ownerKind,
-			"ownerName", ownerName,
-			"error", err,
-		)
-		return
-	}
-	slog.DebugContext(
-		ctx, "recorded VirtualScheduledAt metric",
-		"pod", util.ResourceKeyOf(newPod),
-		"virtualScheduledAt", virtualScheduledAt,
-	)
-	metricManager.Record(point)
+	recordPodVirtualTime(ctx, metricpoint.VirtualScheduledAt, newPod, virtualScheduledAt, now, c, metricManager)
 }
 
 // https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-conditions
@@ -162,9 +91,7 @@ func handleVirtualDeletedAt(
 	metricManager metric.Manager,
 	scheduledAtMap *scheduledAtMapper,
 ) {
-	now := time.Now()
-	elapsedTime := now.Sub(clock.UpdatedAt())
-	virtualDeletedAt := clock.VirtualTime().Add(elapsedTime)
+	virtualDeletedAt, now := externalVirtualTimeNow()
 	slog.DebugContext(
 		ctx, "pod has been deleted",
 		"pod", util.ResourceKeyOf(pod),
@@ -176,7 +103,19 @@ func handleVirtualDeletedAt(
 			"pod", util.ResourceKeyOf(pod),
 		)
 	}
+	recordPodVirtualTime(ctx, metricpoint.VirtualDeletedAt, pod, virtualDeletedAt, now, c, metricManager)
+}
 
+// recordPodVirtualTime records a transition of a Pod at the given virtual time.
+func recordPodVirtualTime(
+	ctx context.Context,
+	virtualTimeName metricpoint.VirtualTimeName,
+	pod *corev1.Pod,
+	virtualTime time.Time,
+	now time.Time,
+	c consts.Consts,
+	metricManager metric.Manager,
+) {
 	ownerRef := metav1.GetControllerOf(pod)
 	ownerName := ""
 	ownerKind := metricpoint.NoOwnerKind
@@ -185,7 +124,7 @@ func handleVirtualDeletedAt(
 		ownerKind = metricpoint.KindTypeFromString(ownerRef.Kind)
 	}
 	point, err := metricpoint.NewVirtualTimeMetricPoint(
-		metricpoint.VirtualDeletedAt,
+		virtualTimeName,
 		metricpoint.PodKind,
 		pod.Namespace,
 		pod.Name,
@@ -195,12 +134,13 @@ func handleVirtualDeletedAt(
 		c.EvaluationID(),
 		metricManager.ScenarioID(),
 		metricManager.Iteration(),
-		virtualDeletedAt,
+		virtualTime,
 		now,
 	)
 	if err != nil {
 		slog.ErrorContext(
-			ctx, "pod.handleVirtualDeletedAt: failed to create metric point",
+			ctx, "pod.recordPodVirtualTime: failed to create metric point",
+			"virtualTimeName", virtualTimeName,
 			"pod", util.ResourceKeyOf(pod),
 			"ownerKind", ownerKind,
 			"ownerName", ownerName,
@@ -209,9 +149,22 @@ func handleVirtualDeletedAt(
 		return
 	}
 	slog.DebugContext(
-		ctx, "recorded VirtualDeletedAt metric",
+		ctx, "recorded "+metricNameOf(virtualTimeName)+" metric",
 		"pod", util.ResourceKeyOf(pod),
-		"virtualDeletedAt", virtualDeletedAt,
+		"virtualTime", virtualTime,
 	)
 	metricManager.Record(point)
+}
+
+func metricNameOf(virtualTimeName metricpoint.VirtualTimeName) string {
+	switch virtualTimeName {
+	case metricpoint.VirtualCreatedAt:
+		return "VirtualCreatedAt"
+	case metricpoint.VirtualScheduledAt:
+		return "VirtualScheduledAt"
+	case metricpoint.VirtualDeletedAt:
+		return "VirtualDeletedAt"
+	default:
+		return virtualTimeName.String()
+	}
 }

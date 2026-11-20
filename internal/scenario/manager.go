@@ -59,6 +59,8 @@ type nextEventDefinitionFn func(context.Context) <-chan definition.Event
 func (m *manager) Run(ctx context.Context) error {
 	slog.InfoContext(ctx, "start new scenario")
 
+	// Stop the informers and the scheduler of this run, so that they do not record the following runs.
+	defer cluster.StopCluster(ctx, m.resourceManager)
 	if !m.consts.IsExternalMode() {
 		if err := cluster.InitCluster(ctx, m.resourceManager, m.schedulerRegistry, m.schedulerOptions); err != nil {
 			return err

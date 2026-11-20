@@ -6,6 +6,7 @@ import (
 	"log/slog"
 
 	jsonpatch "github.com/evanphx/json-patch"
+	"github.com/pfnet/kube-scheduler-evaluator/internal/cluster/pod"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -63,7 +64,46 @@ func prependObjectCreationReactor(client *fakeclientset.Clientset, resource stri
 	})
 }
 
-func prependPodBindingReactor(client *fakeclientset.Clientset, resultCh chan<- scheduleResult) {
+// prependPodRecordReactor records the creation and the deletion of Pods in recorder.
+// It lets the default reactor of the fake client store the change, and records it only if the change succeeds.
+// It must run after the creation reactor for "pods", which sets the name, the UID and the status of a new Pod.
+func prependPodRecordReactor(client *fakeclientset.Clientset, recorder *pod.Recorder) {
+	objectReaction := k8stesting.ObjectReaction(client.Tracker())
+	gvr := corev1.SchemeGroupVersion.WithResource("pods")
+	client.PrependReactor("create", "pods", func(action k8stesting.Action) (handled bool, ret runtime.Object, err error) {
+		if action.GetSubresource() != "" {
+			return false, nil, nil
+		}
+		handled, ret, err = objectReaction(action)
+		if err != nil {
+			return handled, ret, err
+		}
+		if created, ok := ret.(*corev1.Pod); ok {
+			recorder.PodCreated(created)
+		}
+		return handled, ret, err
+	})
+	client.PrependReactor("delete", "pods", func(action k8stesting.Action) (handled bool, ret runtime.Object, err error) {
+		if action.GetSubresource() != "" {
+			return false, nil, nil
+		}
+		deleteAction, ok := action.(k8stesting.DeleteAction)
+		if !ok {
+			return false, nil, nil
+		}
+		obj, getErr := client.Tracker().Get(gvr, deleteAction.GetNamespace(), deleteAction.GetName())
+		handled, ret, err = objectReaction(action)
+		if err != nil || getErr != nil {
+			return handled, ret, err
+		}
+		if deleted, ok := obj.(*corev1.Pod); ok {
+			recorder.PodDeleted(deleted)
+		}
+		return handled, ret, err
+	})
+}
+
+func prependPodBindingReactor(client *fakeclientset.Clientset, recorder *pod.Recorder) {
 	// This reactor is called in scheduler goroutine when scheduler tries to bind a Pod
 	client.PrependReactor("create", "pods/binding", func(action k8stesting.Action) (handled bool, ret runtime.Object, err error) {
 		createAction, ok := action.(k8stesting.CreateAction)
@@ -99,16 +139,20 @@ func prependPodBindingReactor(client *fakeclientset.Clientset, resultCh chan<- s
 			Status:             corev1.ConditionTrue,
 			LastTransitionTime: metav1.Now(),
 		})
+		// Record scheduledAt before storing the bound Pod,
+		// so that scheduledAt is set whenever the informer cache shows the Pod as Running.
+		// The virtual clock does not advance until WaitForScheduler sees the binding in the scheduler cache,
+		// so the virtual time here is that of the event which made the Pod schedulable.
+		recorder.PodScheduled(pod)
 		if err = client.Tracker().Update(gvr, pod, binding.Namespace); err != nil {
 			return true, nil, err
 		}
-		resultCh <- scheduleResult{podName: binding.Name, isScheduled: true, reason: "Bound"}
 		slog.Debug("pod binding succeeded", "pod", binding.Name, "node", binding.Target.Name)
 		return true, nil, nil
 	})
 }
 
-func prependPodPatchReactor(client *fakeclientset.Clientset, resultCh chan<- scheduleResult) {
+func prependPodPatchReactor(client *fakeclientset.Clientset) {
 	// This reactor is called in scheduler goroutine when scheduler patches a Pod (e.g., marking Unschedulable)
 	reactorPatch := func(action k8stesting.Action) (handled bool, ret runtime.Object, err error) {
 		pa, ok := action.(k8stesting.PatchAction)
@@ -129,16 +173,6 @@ func prependPodPatchReactor(client *fakeclientset.Clientset, resultCh chan<- sch
 		pod := patchedObj
 		if err := client.Tracker().Update(gvr, pod, pa.GetNamespace()); err != nil {
 			return true, nil, err
-		}
-		// Notify Unschedulable if applicable
-		for _, cond := range pod.Status.Conditions {
-			if cond.Type == corev1.PodScheduled &&
-				cond.Status == corev1.ConditionFalse &&
-				cond.Reason == corev1.PodReasonUnschedulable {
-				resultCh <- scheduleResult{podName: pod.Name, isScheduled: false, reason: cond.Message}
-				slog.Debug("pod marked unschedulable", "pod", pod.Name, "reason", cond.Message)
-				break
-			}
 		}
 		return true, pod, nil
 	}
