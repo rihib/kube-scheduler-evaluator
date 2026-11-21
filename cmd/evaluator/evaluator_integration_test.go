@@ -15,11 +15,15 @@ import (
 	"github.com/pfnet/kube-scheduler-evaluator/pkg/definition"
 )
 
-// TestRun_WritesOneRecordFilePerRun covers one real run of the evaluator (decisions.md:
+// TestRun_WritesOneRecordFilePerRun covers one real run of the evaluator (units/U01.md:
 // the record's output directory is real, and the computer information is real; only
 // the evaluator commit is irrelevant here and left to its real implementation too,
 // since it does not depend on any external resource). It checks that exactly one JSONL
-// file is created, and that it has a header line followed by transition lines.
+// file is created, and that the real file.Writer preserves the same operation sequence
+// the unit tests check through the Fake writer (create_task -> assign_node -> start ->
+// complete -> release), so a divergence between the Fake and the real Writer (a dropped
+// line, a reordering, a Close that truncates the file) would show up here instead of
+// only in production.
 func TestRun_WritesOneRecordFilePerRun(t *testing.T) {
 	dir := t.TempDir()
 	cfg := WithConfig(
@@ -57,27 +61,47 @@ func TestRun_WritesOneRecordFilePerRun(t *testing.T) {
 	}
 	defer f.Close()
 
+	var lines []map[string]any
 	scanner := bufio.NewScanner(f)
-	if !scanner.Scan() {
+	for scanner.Scan() {
+		var line map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
+			t.Fatalf("line %d is not valid JSON: %v", len(lines)+1, err)
+		}
+		lines = append(lines, line)
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("failed to scan record file: %v", err)
+	}
+	if len(lines) == 0 {
 		t.Fatalf("record file has no header line")
 	}
-	var header map[string]any
-	if err := json.Unmarshal(scanner.Bytes(), &header); err != nil {
-		t.Fatalf("header line is not valid JSON: %v", err)
-	}
+	header := lines[0]
 	if _, ok := header["input"]; !ok {
 		t.Errorf("header line has no input section: %v", header)
 	}
 
-	if !scanner.Scan() {
-		t.Fatalf("record file has no transition lines after the header")
+	// findOps returns, in order, the seq of every transition line with the given operation.
+	findOps := func(op string) []float64 {
+		var seqs []float64
+		for _, l := range lines[1:] {
+			if l["operation"] == op {
+				seqs = append(seqs, mustFloat(t, l["seq"], "seq"))
+			}
+		}
+		return seqs
 	}
-	var transition map[string]any
-	if err := json.Unmarshal(scanner.Bytes(), &transition); err != nil {
-		t.Fatalf("transition line is not valid JSON: %v", err)
+	create, assign, start, complete, release := findOps("create_task"), findOps("assign_node"), findOps("start"), findOps("complete"), findOps("release")
+	for name, seqs := range map[string][]float64{
+		"create_task": create, "assign_node": assign, "start": start, "complete": complete, "release": release,
+	} {
+		if len(seqs) == 0 {
+			t.Fatalf("no %s record found in the written file: %v", name, lines)
+		}
 	}
-	if _, ok := transition["operation"]; !ok {
-		t.Errorf("transition line has no operation: %v", transition)
+	if !(create[0] < assign[0] && assign[0] < start[0] && start[0] < complete[0] && complete[0] <= release[0]) {
+		t.Errorf("records are not in the expected order: create=%v assign=%v start=%v complete=%v release=%v",
+			create[0], assign[0], start[0], complete[0], release[0])
 	}
 }
 

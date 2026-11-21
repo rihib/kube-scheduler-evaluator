@@ -18,7 +18,7 @@ import (
 
 const testUserID = "tester"
 
-// fakeRecordWriter is the Fake writer used by the unit tests below (decisions.md:
+// fakeRecordWriter is the Fake writer used by the unit tests below (units/U01.md:
 // "記録の書き出し先...は、evaluator を作るときに外から渡せるようにする...テストで Fake を渡すため").
 // It keeps the written lines as parsed JSON objects, in order, instead of writing a file.
 type fakeRecordWriter struct {
@@ -52,7 +52,7 @@ func (w *fakeRecordWriter) linesCopy() []map[string]any {
 }
 
 // newFakeRecordSetup returns a config carrying Fakes for the record's writer,
-// evaluator commit and hardware info (decisions.md), and the single writer the
+// evaluator commit and hardware info (units/U01.md), and the single writer the
 // factory will hand back for the one run each test below performs.
 func newFakeRecordSetup() (ConfigOption, ConfigOption, ConfigOption, *fakeRecordWriter) {
 	w := &fakeRecordWriter{}
@@ -72,6 +72,7 @@ func testNode(cpu, mem string) *corev1.Node {
 	node := &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: "node-",
+			Labels:       map[string]string{"zone": "a"},
 		},
 		Status: corev1.NodeStatus{
 			Capacity: corev1.ResourceList{
@@ -90,7 +91,7 @@ func testNode(cpu, mem string) *corev1.Node {
 	return node
 }
 
-// testReplicaSet builds a one-Pod ReplicaSet (one task, decisions.md), with the
+// testReplicaSet builds a one-Pod ReplicaSet (one task, units/U01.md), with the
 // annotations the evaluator needs to decide when the Pod's execution ends.
 func testReplicaSet(namePrefix, podCPU string, priority int32, executionDuration time.Duration) *appsv1.ReplicaSet {
 	podLabels := map[string]string{"app": namePrefix}
@@ -183,6 +184,24 @@ func findTransitions(lines []map[string]any, operation, componentID string) []ma
 	return out
 }
 
+// findTransitionsByStateKey returns, in order, the transition lines whose operation
+// and state_key match. Used for node-keyed mutable states recorded on behalf of an
+// instance (allocated_resource, research.md section 10.5), where component_id is the
+// node and state_key is the instance.
+func findTransitionsByStateKey(lines []map[string]any, operation, stateKey string) []map[string]any {
+	var out []map[string]any
+	for _, l := range lines[1:] {
+		if l["operation"] != operation {
+			continue
+		}
+		if l["state_key"] != stateKey {
+			continue
+		}
+		out = append(out, l)
+	}
+	return out
+}
+
 func mustFloat(t *testing.T, v any, what string) float64 {
 	t.Helper()
 	f, ok := v.(float64)
@@ -240,7 +259,28 @@ func TestRun_NormalLifecycle(t *testing.T) {
 		}
 	})
 
-	t.Run("register_node records the node's capacity at the start", func(t *testing.T) {
+	t.Run("register_node records the node's labels as node_attribute", func(t *testing.T) {
+			attributeRecords := findTransitions(lines, "register_node", "")
+			found := false
+			for _, r := range attributeRecords {
+				if r["state"] != "node_attribute" {
+					continue
+				}
+				found = true
+				after, ok := r["after"].(map[string]any)
+				if !ok {
+					t.Fatalf("register_node node_attribute after = %v, want a map", r["after"])
+				}
+				if after["zone"] != "a" {
+					t.Errorf("registered node_attribute zone = %v, want a", after["zone"])
+				}
+			}
+			if !found {
+				t.Fatalf("no register_node node_attribute record found in %v", attributeRecords)
+			}
+		})
+
+		t.Run("register_node records the node's capacity at the start", func(t *testing.T) {
 		capacityRecords := findTransitions(lines, "register_node", "")
 		found := false
 		for _, r := range capacityRecords {
@@ -277,7 +317,10 @@ func TestRun_NormalLifecycle(t *testing.T) {
 		assignRecords := findTransitions(lines, "assign_node", instanceID)
 		startRecords := findTransitions(lines, "start", instanceID)
 		completeRecords := findTransitions(lines, "complete", instanceID)
-		releaseRecords := findTransitions(lines, "release", instanceID)
+		// release's component_id is the node the allocation was released from, not the
+		// instance (same keying as assign_node's allocated_resource record), so it is
+		// found by state_key instead.
+		releaseRecords := findTransitionsByStateKey(lines, "release", instanceID)
 		for name, recs := range map[string][]map[string]any{
 			"assign_node": assignRecords, "start": startRecords,
 			"complete": completeRecords, "release": releaseRecords,
@@ -305,12 +348,44 @@ func TestRun_NormalLifecycle(t *testing.T) {
 			t.Errorf("start and complete happened at the same virtual time, want complete to be 10s after start")
 		}
 
+		// assign_node and start record at the same virtual time, because internal
+		// execution mode places and starts an instance in the same binding operation
+		// (units/U01.md).
+		assignTime, _ := assignRecords[0]["time"].(string)
+		if assignTime == "" {
+			t.Fatalf("assign_node record has no time: %v", assignRecords[0])
+		}
+		if assignTime != startTime {
+			t.Errorf("assign_node happened at %v but start happened at %v, want the same virtual time", assignTime, startTime)
+		}
+
+		// assign_node's allocated_resource after value must reflect the Pod's actual
+		// resource request, keyed by the node that was assigned (research.md section 10.5).
+		allocatedRecords := findTransitionsByStateKey(lines, "assign_node", instanceID)
+		allocFound := false
+		for _, r := range allocatedRecords {
+			if r["state"] != "allocated_resource" {
+				continue
+			}
+			allocFound = true
+			after, ok := r["after"].(map[string]any)
+			if !ok {
+				t.Fatalf("assign_node allocated_resource after = %v, want a map", r["after"])
+			}
+			if after["cpu"] != "1" {
+				t.Errorf("assign_node allocated_resource.cpu = %v, want 1", after["cpu"])
+			}
+		}
+		if !allocFound {
+			t.Fatalf("no assign_node allocated_resource record found for instance %s in %v", instanceID, allocatedRecords)
+		}
+
 		// complete must not revert assigned_node (research.md section 11.1.2): the
 		// Pod has an assigned_node transition only from assign_node, not from complete.
-		assignedNodeChanges := findTransitions(lines, "delete", instanceID)
+		assignedNodeChanges := findTransitions(lines, "complete", instanceID)
 		for _, r := range assignedNodeChanges {
 			if r["state"] == "assigned_node" {
-				t.Errorf("complete must not record an assigned_node change, but found a delete record: %v", r)
+				t.Errorf("complete must not record an assigned_node change, but found one: %v", r)
 			}
 		}
 	})
@@ -397,6 +472,26 @@ func TestRun_PreemptionCausesDeleteAndRecreate(t *testing.T) {
 	// completed by running to the end of its execution duration.
 	if completeRecords := findTransitions(lines, "complete", preemptedInstanceID); len(completeRecords) != 0 {
 		t.Errorf("preempted instance %s should not also have a complete record: %v", preemptedInstanceID, completeRecords)
+	}
+
+	// delete must revert assigned_node (the opposite of complete, units/U01.md): the
+	// preempted instance was bound to a node before it was deleted.
+	deleteAssignedNodeChanges := findTransitions(lines, "delete", preemptedInstanceID)
+	foundAssignedNodeRevert := false
+	for _, r := range deleteAssignedNodeChanges {
+		if r["state"] != "assigned_node" {
+			continue
+		}
+		foundAssignedNodeRevert = true
+		if before, _ := r["before"].(string); before == "" {
+			t.Errorf("delete's assigned_node before value = %v, want the node the instance was bound to", r["before"])
+		}
+		if _, hasAfter := r["after"]; hasAfter {
+			t.Errorf("delete's assigned_node after value should be absent, got %v", r["after"])
+		}
+	}
+	if !foundAssignedNodeRevert {
+		t.Errorf("no delete record reverting assigned_node found for instance %s: %v", preemptedInstanceID, deleteAssignedNodeChanges)
 	}
 
 	taskID, _ := deleteRecords[0]["task_id"].(string)
