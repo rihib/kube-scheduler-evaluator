@@ -614,3 +614,95 @@ func TestRun_EachIterationRecordsItsOwnRun(t *testing.T) {
 		}
 	}
 }
+
+// cpuContainer returns a container requesting and limiting the given amount of CPU.
+func cpuContainer(name, cpu string) corev1.Container {
+	return corev1.Container{
+		Name:  name,
+		Image: "example.com/image:1.0",
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse(cpu)},
+			Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse(cpu)},
+		},
+	}
+}
+
+// requestAndAllocatedCPUOf returns the CPU in the task's immutable resource_request and
+// in the allocated_resource the instance holds on its node, as recorded for the one
+// task of the given run.
+func requestAndAllocatedCPUOf(t *testing.T, lines []map[string]any) (request, allocated string) {
+	t.Helper()
+	createRecords := findTransitions(lines, "create_task", "")
+	if len(createRecords) == 0 {
+		t.Fatalf("no create_task record found")
+	}
+	instanceID, _ := createRecords[0]["component_id"].(string)
+	for _, r := range createRecords {
+		imm, ok := r["task_immutable"].(map[string]any)
+		if !ok {
+			continue
+		}
+		req, ok := imm["resource_request"].(map[string]any)
+		if !ok {
+			t.Fatalf("task_immutable.resource_request is not an object: %v", imm["resource_request"])
+		}
+		request, _ = req["cpu"].(string)
+	}
+	for _, r := range findTransitionsByStateKey(lines, "assign_node", instanceID) {
+		if r["state"] != "allocated_resource" {
+			continue
+		}
+		after, ok := r["after"].(map[string]any)
+		if !ok {
+			t.Fatalf("assign_node allocated_resource after is not an object: %v", r["after"])
+		}
+		allocated, _ = after["cpu"].(string)
+	}
+	if request == "" || allocated == "" {
+		t.Fatalf("no resource_request (%q) or allocated_resource (%q) recorded: %v", request, allocated, lines)
+	}
+	return request, allocated
+}
+
+// TestRun_MultiContainerPodRecordsAllOfItsContainers covers a Pod with more than one
+// container: the task's resource_request and the instance's allocated_resource must
+// cover every container, not just the first one, because that is what the scheduler
+// reserves on the node.
+func TestRun_MultiContainerPodRecordsAllOfItsContainers(t *testing.T) {
+	lines := runEvaluator(t, func(ch chan<- definition.Event) {
+		rs := testReplicaSet("multi", "1", 0, 10*time.Second)
+		rs.Spec.Template.Spec.Containers = append(rs.Spec.Template.Spec.Containers, cpuContainer("sidecar", "2"))
+		ch <- definition.NewEvent(definition.EventTypeCreate, testNode("4", "8Gi"), 0)
+		ch <- definition.NewEvent(definition.EventTypeCreate, rs, 0)
+	})
+
+	request, allocated := requestAndAllocatedCPUOf(t, lines)
+	if request != "3" {
+		t.Errorf("task_immutable.resource_request.cpu = %v, want 3 (1 + 2 over both containers)", request)
+	}
+	if allocated != "3" {
+		t.Errorf("assign_node allocated_resource.cpu = %v, want 3 (1 + 2 over both containers)", allocated)
+	}
+}
+
+// TestRun_InitContainerCountsTowardThePodsRequest covers a Pod whose init container
+// requests more than its regular containers. kube-scheduler reserves
+// max(sum of the regular containers, the largest init container) on the node, so a
+// record that left the init container out would report less than the scheduler actually
+// held, and the aggregation would see a node as emptier than it was.
+func TestRun_InitContainerCountsTowardThePodsRequest(t *testing.T) {
+	lines := runEvaluator(t, func(ch chan<- definition.Event) {
+		rs := testReplicaSet("init", "1", 0, 10*time.Second)
+		rs.Spec.Template.Spec.InitContainers = []corev1.Container{cpuContainer("setup", "3")}
+		ch <- definition.NewEvent(definition.EventTypeCreate, testNode("4", "8Gi"), 0)
+		ch <- definition.NewEvent(definition.EventTypeCreate, rs, 0)
+	})
+
+	request, allocated := requestAndAllocatedCPUOf(t, lines)
+	if request != "3" {
+		t.Errorf("task_immutable.resource_request.cpu = %v, want 3 (the init container, larger than the regular container's 1)", request)
+	}
+	if allocated != "3" {
+		t.Errorf("assign_node allocated_resource.cpu = %v, want 3 (the init container, larger than the regular container's 1)", allocated)
+	}
+}
