@@ -68,6 +68,11 @@ func prependObjectCreationReactor(client *fakeclientset.Clientset, resource stri
 // prependPodRecordReactor records the creation and the deletion of Pods in recorder.
 // It lets the default reactor of the fake client store the change, and records it only if the change succeeds.
 // It must run after the creation reactor for "pods", which sets the name, the UID and the status of a new Pod.
+//
+// A reactor registered for "pods" is also called for actions on the Pod's subresources,
+// such as the "pods/binding" create that binds a Pod. Those carry a Binding or a
+// status, not a Pod, and have their own reactors (prependPodBindingReactor,
+// prependPodPatchReactor), so they are passed on to the rest of the chain untouched.
 func prependPodRecordReactor(client *fakeclientset.Clientset, recorder *pod.Recorder) {
 	objectReaction := k8stesting.ObjectReaction(client.Tracker())
 	gvr := corev1.SchemeGroupVersion.WithResource("pods")
@@ -107,6 +112,9 @@ func prependPodRecordReactor(client *fakeclientset.Clientset, recorder *pod.Reco
 // prependNodeRecordReactor records the registration and the deregistration of Nodes in
 // the transition record (research.md section 11.5). It runs after the creation reactor
 // for "nodes", which resolves GenerateName to the Node's actual name (the node_id).
+// Actions on a Node's subresources (such as "nodes/status") carry no Node to register
+// or deregister, so they are passed on to the rest of the chain untouched, as in
+// prependPodRecordReactor.
 func prependNodeRecordReactor(client *fakeclientset.Clientset, recordManager record.Manager) {
 	objectReaction := k8stesting.ObjectReaction(client.Tracker())
 	client.PrependReactor("create", "nodes", func(action k8stesting.Action) (handled bool, ret runtime.Object, err error) {

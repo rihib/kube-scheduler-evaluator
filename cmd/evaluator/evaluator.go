@@ -214,7 +214,7 @@ func (c config) resolvedRecordWriterFactory() (record.WriterFactory, error) {
 		return c.recordWriterFactory, nil
 	}
 	if !c.externalMode && c.recordOutputDir == "" {
-		return nil, fmt.Errorf("evaluator.WithConfig: internal execution mode requires WithRecordOutputDir or WithRecordWriterFactory")
+		return nil, fmt.Errorf("evaluator.New: internal execution mode requires WithConfig to be given WithRecordOutputDir or WithRecordWriterFactory")
 	}
 	return record.NewFileWriterFactory(c.recordOutputDir), nil
 }

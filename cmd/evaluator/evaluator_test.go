@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -704,5 +705,24 @@ func TestRun_InitContainerCountsTowardThePodsRequest(t *testing.T) {
 	}
 	if allocated != "3" {
 		t.Errorf("assign_node allocated_resource.cpu = %v, want 3 (the init container, larger than the regular container's 1)", allocated)
+	}
+}
+
+// TestNew_RequiresAPlaceToWriteTheRecordInInternalMode covers New refusing a config
+// that says nothing about where the transition record goes. Internal execution mode
+// always writes one (units/U01.md), so the failure belongs at construction, with the
+// option to set, rather than at the first write of the first run.
+func TestNew_RequiresAPlaceToWriteTheRecordInInternalMode(t *testing.T) {
+	cfg := WithConfig(testUserID, "", "", "", false, slog.LevelError)
+	eval, err := New(
+		cfg,
+		WithMetricStores(),
+		WithScenario("test", 1, func(chan<- definition.Event) {}, nil, testIdentity()),
+	)
+	if err == nil {
+		t.Fatalf("evaluator.New returned %v, want an error when neither the record output dir nor a writer factory is given", eval)
+	}
+	if !strings.Contains(err.Error(), "WithRecordOutputDir") {
+		t.Errorf("evaluator.New error = %q, want it to name the option to set", err)
 	}
 }

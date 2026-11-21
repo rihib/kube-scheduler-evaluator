@@ -78,20 +78,20 @@ func NewManager(
 		return mExt, nil
 	}
 	m.recordManager = record.NewManager(recordWriterFactory, recordCommitProvider, recordHardwareInfoProvider)
-	m.resetFakeCluster()
-
+	// The fake API server and the Pod recorder belong to a run, so InitCluster creates
+	// them; until then this manager has none (see resetFakeCluster).
 	return m, nil
 }
 
-// resetFakeCluster replaces the fake API server and the Pod recorder with fresh ones.
+// resetFakeCluster gives the run that is starting its own fake API server and Pod recorder.
 //
 // A run's scenario is regenerated from scratch every iteration (evaluation.Manager),
 // so its Node and ReplicaSet creation events run again from the start too. Without this
-// reset, a Node from a previous run (named by GenerateName, so it never collides) would
-// stay registered in the fake API server, visible to the scheduler, with no
-// register_node record in the new run's transition record: the record would then miss
-// part of "すべての mutable state の値" at the start of the observation period
-// (units/U01.md). Resetting the Pod recorder together with it also clears
+// reset, a Node from a previous run would stay registered in the fake API server,
+// visible to the scheduler, with no register_node record in the new run's transition
+// record: the record would then miss part of "すべての mutable state の値" at the
+// start of the observation period (units/U01.md), or the run would fail outright on a
+// Node whose name the scenario fixes. Creating the Pod recorder with it also clears
 // tasksCreated and completionMarked, which otherwise kept growing for the life of the
 // evaluator and could carry a stale completion mark into the next run.
 func (m *manager) resetFakeCluster() {
@@ -113,10 +113,14 @@ func (m *manager) resetFakeCluster() {
 type manager struct {
 	// Initialized in NewManager
 	consts        consts.Consts
-	client        kubernetes.Interface
 	metricManager metric.Manager
-	podRecorder   *pod.Recorder  // internal mode only; replaced for each run by resetFakeCluster
 	recordManager record.Manager // internal mode only
+
+	// In external mode, client is initialized in NewManager. In internal mode, client
+	// and podRecorder are the fake API server and the recorder of one run, created for
+	// each run by resetFakeCluster, so both are nil until the first InitCluster.
+	client      kubernetes.Interface
+	podRecorder *pod.Recorder // internal mode only
 
 	// Initialized in InitCluster or InitClusterExternalMode for each run, and released in StopCluster.
 	// A run is one iteration of a scenario.
