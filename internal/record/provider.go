@@ -51,7 +51,7 @@ func NewFileWriterFactory(dir string) WriterFactory {
 
 // evaluatorModulePath is this module's own import path, used to tell whether a binary
 // IS the evaluator (built from this repository) or merely imports it as a dependency
-// (e.g. the reference repository that runs evaluations, see units/U01.md).
+// (e.g. the reference repository that runs evaluations, see decisions.md's 「全体の形」).
 const evaluatorModulePath = "github.com/pfnet/kube-scheduler-evaluator"
 
 // EvaluatorCommit returns the evaluator's own commit, regardless of whether the
