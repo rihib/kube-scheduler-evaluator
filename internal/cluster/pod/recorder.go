@@ -10,8 +10,10 @@ import (
 	"github.com/pfnet/kube-scheduler-evaluator/internal/consts"
 	"github.com/pfnet/kube-scheduler-evaluator/internal/metric"
 	metricpoint "github.com/pfnet/kube-scheduler-evaluator/internal/metric/point"
+	"github.com/pfnet/kube-scheduler-evaluator/internal/record"
 	"github.com/pfnet/kube-scheduler-evaluator/internal/util"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // Recorder records the transitions of Pods in internal mode.
@@ -27,21 +29,43 @@ type Recorder struct {
 	consts         consts.Consts
 	metricManager  metric.Manager
 	scheduledAtMap *scheduledAtMapper
+	recordManager  record.Manager
 
-	mu            sync.Mutex
-	runCtx        context.Context // carries the log attributes of the current run
-	creationOrder map[string]uint64
-	nextOrder     uint64
+	mu               sync.Mutex
+	runCtx           context.Context // carries the log attributes of the current run
+	creationOrder    map[string]uint64
+	nextOrder        uint64
+	tasksCreated     map[string]struct{} // taskID (owner UID) of tasks that already have a recorded instance
+	completionMarked map[string]struct{} // pod keys whose next deletion is a "complete", not a "delete"
 }
 
-func NewRecorder(c consts.Consts, metricManager metric.Manager) *Recorder {
+func NewRecorder(c consts.Consts, metricManager metric.Manager, recordManager record.Manager) *Recorder {
 	return &Recorder{
-		consts:         c,
-		metricManager:  metricManager,
-		scheduledAtMap: newScheduledAtMapper(),
-		runCtx:         context.Background(),
-		creationOrder:  make(map[string]uint64),
+		consts:           c,
+		metricManager:    metricManager,
+		scheduledAtMap:   newScheduledAtMapper(),
+		recordManager:    recordManager,
+		runCtx:           context.Background(),
+		creationOrder:    make(map[string]uint64),
+		tasksCreated:     make(map[string]struct{}),
+		completionMarked: make(map[string]struct{}),
 	}
+}
+
+// MarkCompletion marks that the next deletion of the Pod identified by key is a
+// "complete" (research.md section 11.5), not a "delete". PodDeleted consumes the mark.
+func (r *Recorder) MarkCompletion(key *util.ResourceKey) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.completionMarked[key.String()] = struct{}{}
+}
+
+func (r *Recorder) consumeCompletionMark(key *util.ResourceKey) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, marked := r.completionMarked[key.String()]
+	delete(r.completionMarked, key.String())
+	return marked
 }
 
 // setRunContext sets the context whose log attributes (scenario and iteration) the records carry.
@@ -68,6 +92,81 @@ func (r *Recorder) PodCreated(pod *corev1.Pod) {
 		r.logContext(), metricpoint.VirtualCreatedAt, pod,
 		clock.VirtualTime(), time.Now(), r.consts, r.metricManager,
 	)
+	r.recordTaskCreation(pod)
+}
+
+// recordTaskCreation records create_task for a task's first instance, or recreate for
+// a later one (research.md section 11.1.1). The task is the Pod's owning ReplicaSet
+// (decisions.md): a Pod without one is not part of this experiment's model and is skipped.
+func (r *Recorder) recordTaskCreation(pod *corev1.Pod) {
+	if r.recordManager == nil {
+		return
+	}
+	ownerRef := metav1.GetControllerOf(pod)
+	if ownerRef == nil {
+		return
+	}
+	taskID := string(ownerRef.UID)
+	instanceID := string(pod.UID)
+
+	r.mu.Lock()
+	_, seen := r.tasksCreated[taskID]
+	r.tasksCreated[taskID] = struct{}{}
+	r.mu.Unlock()
+
+	if seen {
+		r.recordManager.Recreate(taskID, instanceID)
+		return
+	}
+	r.recordManager.CreateTask(taskID, instanceID, taskImmutableOf(pod))
+}
+
+// taskImmutableOf maps a Pod's spec to the task's immutable state (research.md section
+// 10.2). job_id is set to the task's own ID, because this experiment maps one openb row
+// to one job containing exactly one task (decisions.md), so job and task are in a 1:1
+// correspondence and no separate job object exists to carry its own identifier.
+func taskImmutableOf(pod *corev1.Pod) record.TaskImmutable {
+	var priority int32
+	if pod.Spec.Priority != nil {
+		priority = *pod.Spec.Priority
+	}
+	ownerRef := metav1.GetControllerOf(pod)
+	taskID := ""
+	if ownerRef != nil {
+		taskID = string(ownerRef.UID)
+	}
+	var request, limit map[string]string
+	if len(pod.Spec.Containers) > 0 {
+		request = resourceListToMap(pod.Spec.Containers[0].Resources.Requests)
+		limit = resourceListToMap(pod.Spec.Containers[0].Resources.Limits)
+	}
+	var constraint map[string]string
+	if len(pod.Spec.NodeSelector) > 0 {
+		constraint = make(map[string]string, len(pod.Spec.NodeSelector))
+		for k, v := range pod.Spec.NodeSelector {
+			constraint[k] = v
+		}
+	}
+	return record.TaskImmutable{
+		Owner:               "", // Kubernetes has no attribute for this (research.md section 10.2).
+		Group:               pod.Namespace,
+		JobID:               taskID,
+		ResourceRequest:     request,
+		ResourceLimit:       limit,
+		PlacementConstraint: constraint,
+		Priority:            priority,
+	}
+}
+
+func resourceListToMap(list corev1.ResourceList) map[string]string {
+	if len(list) == 0 {
+		return nil
+	}
+	m := make(map[string]string, len(list))
+	for name, quantity := range list {
+		m[string(name)] = quantity.String()
+	}
+	return m
 }
 
 // PodScheduled is called after the fake API server has bound a Pod to a node.
@@ -81,6 +180,21 @@ func (r *Recorder) PodScheduled(pod *corev1.Pod) {
 		ctx, metricpoint.VirtualScheduledAt, pod,
 		virtualScheduledAt, time.Now(), r.consts, r.metricManager,
 	)
+	if r.recordManager != nil {
+		if ownerRef := metav1.GetControllerOf(pod); ownerRef != nil {
+			r.recordManager.Bind(string(ownerRef.UID), string(pod.UID), pod.Spec.NodeName, allocatedResourceOf(pod))
+		}
+	}
+}
+
+// allocatedResourceOf returns the resources a bound Pod holds on its node
+// (research.md section 10.5's allocated_resource, keyed by instance_id), taken from its
+// requests (decisions.md does not model allocation changing from the request).
+func allocatedResourceOf(pod *corev1.Pod) map[string]string {
+	if len(pod.Spec.Containers) == 0 {
+		return nil
+	}
+	return resourceListToMap(pod.Spec.Containers[0].Resources.Requests)
 }
 
 // PodDeleted is called after the fake API server has deleted a Pod.
@@ -97,6 +211,16 @@ func (r *Recorder) PodDeleted(pod *corev1.Pod) {
 		ctx, metricpoint.VirtualDeletedAt, pod,
 		clock.VirtualTime(), time.Now(), r.consts, r.metricManager,
 	)
+	if r.recordManager != nil {
+		if ownerRef := metav1.GetControllerOf(pod); ownerRef != nil {
+			taskID, instanceID := string(ownerRef.UID), string(pod.UID)
+			if r.consumeCompletionMark(key) {
+				r.recordManager.Complete(taskID, instanceID)
+			} else {
+				r.recordManager.Delete(taskID, instanceID)
+			}
+		}
+	}
 }
 
 // creationOrderOf returns the position of the Pod among the Pods created through the fake API server.

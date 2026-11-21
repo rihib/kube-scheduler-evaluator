@@ -38,6 +38,7 @@ func NewManager(
 		resourceManager:     resourceManager,
 		schedulerRegistry:   s.SchedulerRegistry(),
 		schedulerOptions:    s.SchedulerOptions(),
+		runIdentity:         s.RunIdentity(),
 	}
 }
 
@@ -52,6 +53,7 @@ type manager struct {
 	nextRelativeTime    time.Duration
 	schedulerRegistry   runtime.Registry
 	schedulerOptions    []scheduler.Option
+	runIdentity         definition.RunIdentity
 }
 
 type nextEventDefinitionFn func(context.Context) <-chan definition.Event
@@ -62,7 +64,7 @@ func (m *manager) Run(ctx context.Context) error {
 	// Stop the informers and the scheduler of this run, so that they do not record the following runs.
 	defer cluster.StopCluster(ctx, m.resourceManager)
 	if !m.consts.IsExternalMode() {
-		if err := cluster.InitCluster(ctx, m.resourceManager, m.schedulerRegistry, m.schedulerOptions); err != nil {
+		if err := cluster.InitCluster(ctx, m.resourceManager, m.schedulerRegistry, m.schedulerOptions, m.runIdentity); err != nil {
 			return err
 		}
 	} else {
@@ -183,6 +185,10 @@ func (m *manager) nextDeleteEventsBefore(ctx context.Context, e event.Event) (ev
 	if err != nil {
 		return nil, err
 	}
+	// This delete event comes from the Pod's execution duration elapsing, not from a
+	// scenario-defined deletion or a preemption, so it records as "complete" rather
+	// than "delete" (research.md section 11.5, decisions.md).
+	deleteEvent.SetCompletion(true)
 	return deleteEvent, nil
 }
 

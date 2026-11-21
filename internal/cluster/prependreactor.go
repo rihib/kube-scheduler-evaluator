@@ -7,6 +7,7 @@ import (
 
 	jsonpatch "github.com/evanphx/json-patch"
 	"github.com/pfnet/kube-scheduler-evaluator/internal/cluster/pod"
+	"github.com/pfnet/kube-scheduler-evaluator/internal/record"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -101,6 +102,56 @@ func prependPodRecordReactor(client *fakeclientset.Clientset, recorder *pod.Reco
 		}
 		return handled, ret, err
 	})
+}
+
+// prependNodeRecordReactor records the registration and the deregistration of Nodes in
+// the transition record (research.md section 11.5). It runs after the creation reactor
+// for "nodes", which resolves GenerateName to the Node's actual name (the node_id).
+func prependNodeRecordReactor(client *fakeclientset.Clientset, recordManager record.Manager) {
+	objectReaction := k8stesting.ObjectReaction(client.Tracker())
+	client.PrependReactor("create", "nodes", func(action k8stesting.Action) (handled bool, ret runtime.Object, err error) {
+		handled, ret, err = objectReaction(action)
+		if err != nil {
+			return handled, ret, err
+		}
+		if created, ok := ret.(*corev1.Node); ok {
+			recordManager.RegisterNode(created.Name, capacityOf(created), attributeOf(created))
+		}
+		return handled, ret, err
+	})
+	client.PrependReactor("delete", "nodes", func(action k8stesting.Action) (handled bool, ret runtime.Object, err error) {
+		deleteAction, ok := action.(k8stesting.DeleteAction)
+		if !ok {
+			return false, nil, nil
+		}
+		nodeName := deleteAction.GetName()
+		handled, ret, err = objectReaction(action)
+		if err != nil {
+			return handled, ret, err
+		}
+		recordManager.DeregisterNode(nodeName)
+		return handled, ret, err
+	})
+}
+
+// capacityOf returns the node's resource_capacity (research.md section 10.5),
+// mapped from status.allocatable (decisions.md).
+func capacityOf(node *corev1.Node) map[string]string {
+	capacity := make(map[string]string, len(node.Status.Allocatable))
+	for name, quantity := range node.Status.Allocatable {
+		capacity[string(name)] = quantity.String()
+	}
+	return capacity
+}
+
+// attributeOf returns the node's node_attribute (research.md section 10.5),
+// mapped from the node's labels (decisions.md).
+func attributeOf(node *corev1.Node) map[string]string {
+	attribute := make(map[string]string, len(node.Labels))
+	for k, v := range node.Labels {
+		attribute[k] = v
+	}
+	return attribute
 }
 
 func prependPodBindingReactor(client *fakeclientset.Clientset, recorder *pod.Recorder) {

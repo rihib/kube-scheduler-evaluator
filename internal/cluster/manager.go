@@ -12,7 +12,9 @@ import (
 	"github.com/pfnet/kube-scheduler-evaluator/internal/consts"
 	"github.com/pfnet/kube-scheduler-evaluator/internal/event"
 	"github.com/pfnet/kube-scheduler-evaluator/internal/metric"
+	"github.com/pfnet/kube-scheduler-evaluator/internal/record"
 	"github.com/pfnet/kube-scheduler-evaluator/internal/util"
+	"github.com/pfnet/kube-scheduler-evaluator/pkg/definition"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/informers"
@@ -40,7 +42,13 @@ type Manager interface {
 	IsAnyScheduledAtRemaining(context.Context) bool
 }
 
-func NewManager(c consts.Consts, metricManager metric.Manager) (Manager, error) {
+func NewManager(
+	c consts.Consts,
+	metricManager metric.Manager,
+	recordWriterFactory record.WriterFactory,
+	recordCommitProvider record.CommitProvider,
+	recordHardwareInfoProvider record.HardwareInfoProvider,
+) (Manager, error) {
 	m := &manager{
 		consts:        c,
 		metricManager: metricManager,
@@ -71,10 +79,12 @@ func NewManager(c consts.Consts, metricManager metric.Manager) (Manager, error) 
 	}
 	fakeClient := fakeclientset.NewSimpleClientset()
 	m.client = fakeClient
-	m.podRecorder = pod.NewRecorder(c, metricManager)
+	m.recordManager = record.NewManager(recordWriterFactory, recordCommitProvider, recordHardwareInfoProvider)
+	m.podRecorder = pod.NewRecorder(c, metricManager, m.recordManager)
 
 	// PrependReactor puts a reactor in front of the chain, so the reactors registered later run earlier.
 	prependPodRecordReactor(fakeClient, m.podRecorder)
+	prependNodeRecordReactor(fakeClient, m.recordManager)
 	prependObjectCreationReactor(fakeClient, "nodes")
 	prependObjectCreationReactor(fakeClient, "pods")
 	prependObjectCreationReactor(fakeClient, "replicasets")
@@ -90,7 +100,8 @@ type manager struct {
 	consts        consts.Consts
 	client        kubernetes.Interface
 	metricManager metric.Manager
-	podRecorder   *pod.Recorder // internal mode only
+	podRecorder   *pod.Recorder  // internal mode only
+	recordManager record.Manager // internal mode only
 
 	// Initialized in InitCluster or InitClusterExternalMode for each run, and released in StopCluster.
 	// A run is one iteration of a scenario.
@@ -104,12 +115,24 @@ type manager struct {
 }
 
 // To prevent managerExternalMode from accessing the InitCluster method, InitCluster is not defined as a method of manager.
-func InitCluster(ctx context.Context, mng Manager, schedulerRegistry runtime.Registry, schedulerOpts []scheduler.Option) error {
+func InitCluster(
+	ctx context.Context, mng Manager,
+	schedulerRegistry runtime.Registry, schedulerOpts []scheduler.Option,
+	runIdentity definition.RunIdentity,
+) error {
 	slog.DebugContext(ctx, "initializing cluster")
 
 	m, ok := mng.(*manager)
 	if !ok {
 		return fmt.Errorf("cluster.InitCluster: manager is not of type manager")
+	}
+	if err := m.recordManager.BeginRun(ctx, record.RunInfo{
+		EvaluationID: m.consts.EvaluationID(),
+		ScenarioID:   m.metricManager.ScenarioID(),
+		Iteration:    m.metricManager.Iteration(),
+		Identity:     runIdentity,
+	}); err != nil {
+		return fmt.Errorf("cluster.InitCluster: %w", err)
 	}
 	runCtx := m.beginRun(ctx)
 	if err := initInformers(runCtx, m); err != nil {
@@ -136,6 +159,11 @@ func StopCluster(ctx context.Context, mng Manager) {
 		return
 	}
 	m.stopRun()
+	if m.recordManager != nil {
+		if err := m.recordManager.EndRun(); err != nil {
+			slog.ErrorContext(ctx, "cluster.StopCluster: failed to close the transition record", "error", err)
+		}
+	}
 	slog.DebugContext(ctx, "cluster stopped")
 }
 
