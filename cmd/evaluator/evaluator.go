@@ -2,6 +2,7 @@ package evaluator
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -53,11 +54,15 @@ func New(
 	if err != nil {
 		return nil, err
 	}
+	writerFactory, err := config.resolvedRecordWriterFactory()
+	if err != nil {
+		return nil, err
+	}
 	resourceManager, err := cluster.NewManager(
 		c, metricManager,
-		config.recordWriterFactory(),
-		config.recordCommitProvider(),
-		config.recordHardwareInfoProvider(),
+		writerFactory,
+		config.resolvedCommitProvider(),
+		config.resolvedHardwareInfoProvider(),
 	)
 	if err != nil {
 		return nil, err
@@ -122,66 +127,68 @@ type config struct {
 	etcdURL        string
 
 	// recordOutputDir is the folder the transition record (research.md section 11.5)
-	// is written to in internal execution mode (decisions.md). It is unused in
-	// external mode, where this record is out of scope.
+	// is written to in internal execution mode (units/U01.md). It is unused in
+	// external mode, where this record is out of scope. WithConfig requires either it
+	// or a RecordWriterFactory override in internal mode.
 	recordOutputDir string
 	// recordWriterFactory, commitProvider and hardwareInfoProvider are overridable so
 	// that tests can pass Fakes for where the record is written, the evaluator's own
-	// commit, and the machine's hardware (decisions.md). Real implementations are used
+	// commit, and the machine's hardware (units/U01.md). Real implementations are used
 	// when a caller does not set them.
-	recordWriterFactoryOverride RecordWriterFactory
-	commitProvider              CommitProvider
-	hardwareInfoProvider        HardwareInfoProvider
+	recordWriterFactory  RecordWriterFactory
+	commitProvider       CommitProvider
+	hardwareInfoProvider HardwareInfoProvider
 }
 
-// RecordWriter writes one run's transition record. See record.Writer.
-type RecordWriter interface {
-	WriteLine(v any) error
-	Close() error
-}
+// RecordWriter writes one run's transition record.
+type RecordWriter = record.Writer
 
 // RecordWriterFactory opens the RecordWriter for one run.
-type RecordWriterFactory func(info RecordRunInfo) (RecordWriter, error)
+type RecordWriterFactory = record.WriterFactory
 
-// RecordRunInfo identifies the run a RecordWriterFactory is opening a writer for. See record.RunInfo.
+// RecordRunInfo identifies the run a RecordWriterFactory is opening a writer for.
 type RecordRunInfo = record.RunInfo
 
 // CommitProvider returns the evaluator's own commit, for the transition record's header.
-type CommitProvider func() (string, error)
+type CommitProvider = record.CommitProvider
 
 // HardwareInfoProvider returns a description of the machine running the evaluator,
 // for the transition record's header.
-type HardwareInfoProvider func() (string, error)
+type HardwareInfoProvider = record.HardwareInfoProvider
 
 // ConfigOption customizes a config returned by WithConfig.
 type ConfigOption func(*config)
 
 // WithRecordOutputDir sets the folder the transition record is written to
-// (research.md section 11.5, decisions.md). Required in internal execution mode.
+// (research.md section 11.5, units/U01.md). Required in internal execution mode,
+// unless WithRecordWriterFactory is also given.
 func WithRecordOutputDir(dir string) ConfigOption {
 	return func(c *config) { c.recordOutputDir = dir }
 }
 
 // WithRecordWriterFactory overrides how the transition record is written. Tests use
-// this to pass a Fake instead of writing to a file (decisions.md).
+// this to pass a Fake instead of writing to a file (units/U01.md).
 func WithRecordWriterFactory(fn RecordWriterFactory) ConfigOption {
-	return func(c *config) { c.recordWriterFactoryOverride = fn }
+	return func(c *config) { c.recordWriterFactory = fn }
 }
 
 // WithCommitProvider overrides how the evaluator's own commit is obtained for the
-// transition record's header. Tests use this to pass a Fake (decisions.md).
+// transition record's header. Tests use this to pass a Fake (units/U01.md).
 func WithCommitProvider(fn CommitProvider) ConfigOption {
 	return func(c *config) { c.commitProvider = fn }
 }
 
 // WithHardwareInfoProvider overrides how the machine's hardware information is
 // obtained for the transition record's header. Tests use this to pass a Fake
-// (decisions.md).
+// (units/U01.md).
 func WithHardwareInfoProvider(fn HardwareInfoProvider) ConfigOption {
 	return func(c *config) { c.hardwareInfoProvider = fn }
 }
 
-// WithConfig creates a config instance for the evaluator.
+// WithConfig creates a config instance for the evaluator. In internal execution mode,
+// opts must include WithRecordOutputDir or WithRecordWriterFactory: without one of
+// them, New would only fail once the first run tries to write the transition record,
+// with a confusing "no such file or directory" (units/U01.md requires this record).
 func WithConfig(
 	userID, kubeconfigPath, etcdPrefix, etcdURL string,
 	externalMode bool,
@@ -202,25 +209,26 @@ func WithConfig(
 	return cfg
 }
 
-func (c config) recordWriterFactory() record.WriterFactory {
-	if c.recordWriterFactoryOverride != nil {
-		return func(info record.RunInfo) (record.Writer, error) {
-			return c.recordWriterFactoryOverride(info)
-		}
+func (c config) resolvedRecordWriterFactory() (record.WriterFactory, error) {
+	if c.recordWriterFactory != nil {
+		return c.recordWriterFactory, nil
 	}
-	return record.NewFileWriterFactory(c.recordOutputDir)
+	if !c.externalMode && c.recordOutputDir == "" {
+		return nil, fmt.Errorf("evaluator.WithConfig: internal execution mode requires WithRecordOutputDir or WithRecordWriterFactory")
+	}
+	return record.NewFileWriterFactory(c.recordOutputDir), nil
 }
 
-func (c config) recordCommitProvider() record.CommitProvider {
+func (c config) resolvedCommitProvider() record.CommitProvider {
 	if c.commitProvider != nil {
-		return record.CommitProvider(c.commitProvider)
+		return c.commitProvider
 	}
 	return record.EvaluatorCommit
 }
 
-func (c config) recordHardwareInfoProvider() record.HardwareInfoProvider {
+func (c config) resolvedHardwareInfoProvider() record.HardwareInfoProvider {
 	if c.hardwareInfoProvider != nil {
-		return record.HardwareInfoProvider(c.hardwareInfoProvider)
+		return c.hardwareInfoProvider
 	}
 	return record.HardwareInfo
 }
@@ -232,7 +240,7 @@ func WithMetricStores(stores ...definition.MetricStore) []definition.MetricStore
 
 // WithScenario creates a Scenario instance. identity identifies this scenario's runs
 // in the transition record (research.md section 11.5); the evaluator cannot derive it
-// itself (decisions.md).
+// itself (units/U01.md).
 func WithScenario(
 	name string, iteration int, generator generatorFn,
 	registry runtime.Registry, identity definition.RunIdentity, opts ...scheduler.Option,

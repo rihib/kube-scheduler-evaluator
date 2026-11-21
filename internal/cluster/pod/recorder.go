@@ -13,6 +13,7 @@ import (
 	"github.com/pfnet/kube-scheduler-evaluator/internal/record"
 	"github.com/pfnet/kube-scheduler-evaluator/internal/util"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -23,8 +24,9 @@ import (
 // so every transition gets the virtual time of the event that caused it,
 // regardless of how long the scheduler or the informers take in real time.
 //
-// Recorder lives as long as the cluster manager, because the reactors are registered once
-// on the fake API server, while a PodManager is created for each run.
+// A Recorder is created fresh for each run, together with the fake API server its
+// reactors are registered on (cluster.manager.resetFakeCluster), so that state such as
+// tasksCreated and completionMarked does not leak from one run into the next.
 type Recorder struct {
 	consts         consts.Consts
 	metricManager  metric.Manager
@@ -97,7 +99,7 @@ func (r *Recorder) PodCreated(pod *corev1.Pod) {
 
 // recordTaskCreation records create_task for a task's first instance, or recreate for
 // a later one (research.md section 11.1.1). The task is the Pod's owning ReplicaSet
-// (decisions.md): a Pod without one is not part of this experiment's model and is skipped.
+// (units/U01.md): a Pod without one is not part of this experiment's model and is skipped.
 func (r *Recorder) recordTaskCreation(pod *corev1.Pod) {
 	if r.recordManager == nil {
 		return
@@ -118,27 +120,19 @@ func (r *Recorder) recordTaskCreation(pod *corev1.Pod) {
 		r.recordManager.Recreate(taskID, instanceID)
 		return
 	}
-	r.recordManager.CreateTask(taskID, instanceID, taskImmutableOf(pod))
+	r.recordManager.CreateTask(taskID, instanceID, taskImmutableOf(pod, taskID))
 }
 
 // taskImmutableOf maps a Pod's spec to the task's immutable state (research.md section
-// 10.2). job_id is set to the task's own ID, because this experiment maps one openb row
-// to one job containing exactly one task (decisions.md), so job and task are in a 1:1
-// correspondence and no separate job object exists to carry its own identifier.
-func taskImmutableOf(pod *corev1.Pod) record.TaskImmutable {
+// 10.2). job_id is set to taskID, because this experiment maps one openb row to one job
+// containing exactly one task (units/U01.md), so job and task are in a 1:1
+// correspondence and no separate job object exists to carry its own identifier. taskID
+// is a parameter rather than derived again from pod here, because every caller already
+// has it from the owner reference it required to call this function at all.
+func taskImmutableOf(pod *corev1.Pod, taskID string) record.TaskImmutable {
 	var priority int32
 	if pod.Spec.Priority != nil {
 		priority = *pod.Spec.Priority
-	}
-	ownerRef := metav1.GetControllerOf(pod)
-	taskID := ""
-	if ownerRef != nil {
-		taskID = string(ownerRef.UID)
-	}
-	var request, limit map[string]string
-	if len(pod.Spec.Containers) > 0 {
-		request = resourceListToMap(pod.Spec.Containers[0].Resources.Requests)
-		limit = resourceListToMap(pod.Spec.Containers[0].Resources.Limits)
 	}
 	var constraint map[string]string
 	if len(pod.Spec.NodeSelector) > 0 {
@@ -151,20 +145,39 @@ func taskImmutableOf(pod *corev1.Pod) record.TaskImmutable {
 		Owner:               "", // Kubernetes has no attribute for this (research.md section 10.2).
 		Group:               pod.Namespace,
 		JobID:               taskID,
-		ResourceRequest:     request,
-		ResourceLimit:       limit,
+		ResourceRequest:     sumContainerResources(pod.Spec.Containers, requestsOf),
+		ResourceLimit:       sumContainerResources(pod.Spec.Containers, limitsOf),
 		PlacementConstraint: constraint,
 		Priority:            priority,
 	}
 }
 
-func resourceListToMap(list corev1.ResourceList) map[string]string {
-	if len(list) == 0 {
+func requestsOf(c corev1.Container) corev1.ResourceList { return c.Resources.Requests }
+func limitsOf(c corev1.Container) corev1.ResourceList   { return c.Resources.Limits }
+
+// sumContainerResources sums the resource list selected by get across all of a Pod's
+// containers, so that a multi-container Pod's immutable state and allocated_resource
+// reflect what the scheduler actually reserves on the node, not just its first
+// container. Init containers are not included: they do not run alongside the regular
+// containers, so the scheduler does not hold their resources for the Pod's whole run.
+func sumContainerResources(containers []corev1.Container, get func(corev1.Container) corev1.ResourceList) map[string]string {
+	sums := make(map[corev1.ResourceName]resource.Quantity)
+	for _, c := range containers {
+		for name, qty := range get(c) {
+			if existing, ok := sums[name]; ok {
+				existing.Add(qty)
+				sums[name] = existing
+			} else {
+				sums[name] = qty.DeepCopy()
+			}
+		}
+	}
+	if len(sums) == 0 {
 		return nil
 	}
-	m := make(map[string]string, len(list))
-	for name, quantity := range list {
-		m[string(name)] = quantity.String()
+	m := make(map[string]string, len(sums))
+	for name, qty := range sums {
+		m[string(name)] = qty.String()
 	}
 	return m
 }
@@ -189,12 +202,11 @@ func (r *Recorder) PodScheduled(pod *corev1.Pod) {
 
 // allocatedResourceOf returns the resources a bound Pod holds on its node
 // (research.md section 10.5's allocated_resource, keyed by instance_id), taken from its
-// requests (decisions.md does not model allocation changing from the request).
+// requests. Neither units/U01.md nor decisions.md models an instance's allocation
+// changing after it is assigned a node, and this pilot's scenarios never resize a
+// running Pod, so requests at bind time are the instance's allocation for the whole run.
 func allocatedResourceOf(pod *corev1.Pod) map[string]string {
-	if len(pod.Spec.Containers) == 0 {
-		return nil
-	}
-	return resourceListToMap(pod.Spec.Containers[0].Resources.Requests)
+	return sumContainerResources(pod.Spec.Containers, requestsOf)
 }
 
 // PodDeleted is called after the fake API server has deleted a Pod.

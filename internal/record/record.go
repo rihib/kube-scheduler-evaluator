@@ -10,6 +10,7 @@ package record
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 
 	"github.com/pfnet/kube-scheduler-evaluator/internal/clock"
@@ -148,7 +149,7 @@ type Manager interface {
 	// Recreate records a new instance of a task whose previous instance ended in failed or deleted.
 	Recreate(taskID, instanceID string)
 	// Bind records assign_node and start together, because internal execution mode places and starts
-	// an instance in the same binding operation (decisions.md).
+	// an instance in the same binding operation (units/U01.md).
 	Bind(taskID, instanceID, nodeID string, allocated map[string]string)
 	// Complete records an instance's completion. It does not revert assigned_node (research.md 11.1.2).
 	Complete(taskID, instanceID string)
@@ -176,6 +177,7 @@ type instanceState struct {
 }
 
 type allocationState struct {
+	nodeID    string
 	resources map[string]string
 }
 
@@ -186,6 +188,7 @@ type manager struct {
 
 	mu          sync.Mutex
 	writer      Writer
+	writeErr    error // the first error from writer.WriteLine during the current run, if any
 	seq         uint64
 	nodes       map[string]*nodeState
 	instances   map[string]*instanceState
@@ -195,6 +198,14 @@ type manager struct {
 func (m *manager) BeginRun(ctx context.Context, info RunInfo) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// BeginRun must be called once per run, and EndRun before the next BeginRun
+	// (Manager's doc comment); check it here instead of leaving it as a comment the
+	// caller must remember, so a violation fails fast instead of leaking the
+	// previous run's open file.
+	if m.writer != nil {
+		return fmt.Errorf("record.BeginRun: a run is already open; call EndRun before starting a new one")
+	}
 
 	w, err := m.writerFactory(info)
 	if err != nil {
@@ -236,6 +247,7 @@ func (m *manager) BeginRun(ctx context.Context, info RunInfo) error {
 	}
 
 	m.writer = w
+	m.writeErr = nil
 	m.seq = 0
 	m.nodes = make(map[string]*nodeState)
 	m.instances = make(map[string]*instanceState)
@@ -243,16 +255,26 @@ func (m *manager) BeginRun(ctx context.Context, info RunInfo) error {
 	return nil
 }
 
+// EndRun closes the current run's writer and reports whether every line reached it.
+// A write failure (e.g. a full disk) does not stop the run early, because the
+// recorded operations also drive the fake API server's state; EndRun is where that
+// failure finally surfaces, instead of being dropped, so a caller does not mistake an
+// incomplete record for a complete one.
 func (m *manager) EndRun() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.writer == nil {
 		return nil
 	}
-	err := m.writer.Close()
+	closeErr := m.writer.Close()
+	writeErr := m.writeErr
 	m.writer = nil
-	if err != nil {
-		return fmt.Errorf("record.EndRun: failed to close writer: %w", err)
+	m.writeErr = nil
+	if writeErr != nil {
+		return fmt.Errorf("record.EndRun: failed to write one or more transitions: %w", writeErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("record.EndRun: failed to close writer: %w", closeErr)
 	}
 	return nil
 }
@@ -274,7 +296,12 @@ func (m *manager) write(op, componentID, taskID, state, stateKey string, before,
 	if m.writer == nil {
 		return
 	}
-	_ = m.writer.WriteLine(t) // Errors here would have to be surfaced through every operation hook; a run-ending flush would be too late to matter. Logged by the caller's writer implementation if needed.
+	if err := m.writer.WriteLine(t); err != nil && m.writeErr == nil {
+		// Keep only the first failure: once one line has failed to write, later
+		// failures are very likely the same underlying cause (e.g. a full disk).
+		m.writeErr = fmt.Errorf("record: failed to write operation %q at seq %d: %w", op, t.Seq, err)
+		slog.Error("record.write: failed to write a transition line", "operation", op, "seq", t.Seq, "error", err)
+	}
 }
 
 func (m *manager) RegisterNode(nodeID string, capacity, attribute map[string]string) {
@@ -327,8 +354,10 @@ func (m *manager) Bind(taskID, instanceID, nodeID string, allocated map[string]s
 	inst.assignedNode = nodeID
 	m.write(OpAssignNode, instanceID, taskID, StateAssignedNode, "", beforeNode, nodeID, nil)
 
-	m.allocations[instanceID] = &allocationState{resources: allocated}
-	m.write(OpAssignNode, instanceID, taskID, StateAllocatedResource, instanceID, nil, allocated, nil)
+	// allocated_resource is a mutable state of the node, keyed by instance_id
+	// (research.md section 10.5), so component_id must be the node, not the instance.
+	m.allocations[instanceID] = &allocationState{nodeID: nodeID, resources: allocated}
+	m.write(OpAssignNode, nodeID, taskID, StateAllocatedResource, instanceID, nil, allocated, nil)
 
 	var beforeStatus any
 	if inst.status != "" {
@@ -384,5 +413,6 @@ func (m *manager) release(taskID, instanceID string) {
 		return
 	}
 	delete(m.allocations, instanceID)
-	m.write(OpRelease, instanceID, taskID, StateAllocatedResource, instanceID, alloc.resources, nil, nil)
+	// Same keying as assign_node's allocated_resource record: component_id is the node.
+	m.write(OpRelease, alloc.nodeID, taskID, StateAllocatedResource, instanceID, alloc.resources, nil, nil)
 }

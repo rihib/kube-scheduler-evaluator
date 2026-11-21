@@ -3,7 +3,7 @@ package definition
 // RunIdentity identifies one run (one scenario, one iteration) in the transition record
 // (research.md section 11.5). The evaluator cannot derive this itself: it does not know
 // how the input was produced or how the scheduler profile was configured, so the caller
-// (the program that runs the evaluator, see decisions.md) supplies it.
+// (the program that runs the evaluator, see units/U01.md) supplies it.
 type RunIdentity struct {
 	TraceName        string  // The name of the input trace, e.g. "openb".
 	TraceVersion     string  // The version of the input trace.

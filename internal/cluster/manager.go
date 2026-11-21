@@ -77,10 +77,27 @@ func NewManager(
 		}
 		return mExt, nil
 	}
+	m.recordManager = record.NewManager(recordWriterFactory, recordCommitProvider, recordHardwareInfoProvider)
+	m.resetFakeCluster()
+
+	return m, nil
+}
+
+// resetFakeCluster replaces the fake API server and the Pod recorder with fresh ones.
+//
+// A run's scenario is regenerated from scratch every iteration (evaluation.Manager),
+// so its Node and ReplicaSet creation events run again from the start too. Without this
+// reset, a Node from a previous run (named by GenerateName, so it never collides) would
+// stay registered in the fake API server, visible to the scheduler, with no
+// register_node record in the new run's transition record: the record would then miss
+// part of "すべての mutable state の値" at the start of the observation period
+// (units/U01.md). Resetting the Pod recorder together with it also clears
+// tasksCreated and completionMarked, which otherwise kept growing for the life of the
+// evaluator and could carry a stale completion mark into the next run.
+func (m *manager) resetFakeCluster() {
 	fakeClient := fakeclientset.NewSimpleClientset()
 	m.client = fakeClient
-	m.recordManager = record.NewManager(recordWriterFactory, recordCommitProvider, recordHardwareInfoProvider)
-	m.podRecorder = pod.NewRecorder(c, metricManager, m.recordManager)
+	m.podRecorder = pod.NewRecorder(m.consts, m.metricManager, m.recordManager)
 
 	// PrependReactor puts a reactor in front of the chain, so the reactors registered later run earlier.
 	prependPodRecordReactor(fakeClient, m.podRecorder)
@@ -91,8 +108,6 @@ func NewManager(
 	prependPodBindingReactor(fakeClient, m.podRecorder)
 	prependPodPatchReactor(fakeClient)
 	prependDebugReactor(fakeClient)
-
-	return m, nil
 }
 
 type manager struct {
@@ -100,7 +115,7 @@ type manager struct {
 	consts        consts.Consts
 	client        kubernetes.Interface
 	metricManager metric.Manager
-	podRecorder   *pod.Recorder  // internal mode only
+	podRecorder   *pod.Recorder  // internal mode only; replaced for each run by resetFakeCluster
 	recordManager record.Manager // internal mode only
 
 	// Initialized in InitCluster or InitClusterExternalMode for each run, and released in StopCluster.
@@ -134,6 +149,8 @@ func InitCluster(
 	}); err != nil {
 		return fmt.Errorf("cluster.InitCluster: %w", err)
 	}
+	// Each run gets its own fake API server and Pod recorder; see resetFakeCluster.
+	m.resetFakeCluster()
 	runCtx := m.beginRun(ctx)
 	if err := initInformers(runCtx, m); err != nil {
 		return err

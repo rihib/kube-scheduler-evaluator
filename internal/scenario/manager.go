@@ -187,7 +187,7 @@ func (m *manager) nextDeleteEventsBefore(ctx context.Context, e event.Event) (ev
 	}
 	// This delete event comes from the Pod's execution duration elapsing, not from a
 	// scenario-defined deletion or a preemption, so it records as "complete" rather
-	// than "delete" (research.md section 11.5, decisions.md).
+	// than "delete" (research.md section 11.5, units/U01.md).
 	deleteEvent.SetCompletion(true)
 	return deleteEvent, nil
 }

@@ -110,6 +110,9 @@ func prependPodRecordReactor(client *fakeclientset.Clientset, recorder *pod.Reco
 func prependNodeRecordReactor(client *fakeclientset.Clientset, recordManager record.Manager) {
 	objectReaction := k8stesting.ObjectReaction(client.Tracker())
 	client.PrependReactor("create", "nodes", func(action k8stesting.Action) (handled bool, ret runtime.Object, err error) {
+		if action.GetSubresource() != "" {
+			return false, nil, nil
+		}
 		handled, ret, err = objectReaction(action)
 		if err != nil {
 			return handled, ret, err
@@ -120,6 +123,9 @@ func prependNodeRecordReactor(client *fakeclientset.Clientset, recordManager rec
 		return handled, ret, err
 	})
 	client.PrependReactor("delete", "nodes", func(action k8stesting.Action) (handled bool, ret runtime.Object, err error) {
+		if action.GetSubresource() != "" {
+			return false, nil, nil
+		}
 		deleteAction, ok := action.(k8stesting.DeleteAction)
 		if !ok {
 			return false, nil, nil
@@ -135,7 +141,7 @@ func prependNodeRecordReactor(client *fakeclientset.Clientset, recordManager rec
 }
 
 // capacityOf returns the node's resource_capacity (research.md section 10.5),
-// mapped from status.allocatable (decisions.md).
+// mapped from status.allocatable (units/U01.md).
 func capacityOf(node *corev1.Node) map[string]string {
 	capacity := make(map[string]string, len(node.Status.Allocatable))
 	for name, quantity := range node.Status.Allocatable {
@@ -145,7 +151,7 @@ func capacityOf(node *corev1.Node) map[string]string {
 }
 
 // attributeOf returns the node's node_attribute (research.md section 10.5),
-// mapped from the node's labels (decisions.md).
+// mapped from the node's labels (units/U01.md).
 func attributeOf(node *corev1.Node) map[string]string {
 	attribute := make(map[string]string, len(node.Labels))
 	for k, v := range node.Labels {

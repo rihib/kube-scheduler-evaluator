@@ -32,7 +32,7 @@ kube-scheduler-evaluator emulates controllers internally, enabling evaluations t
 Import kube-scheduler-evaluator as shown below, implement a scenario generator function, and create a program to execute evaluations.
 The scenario generator function receives an event channel and sends events to the channel to create or delete nodes and jobs (actually ReplicaSets).
 Therefore, users can execute arbitrary scenarios by implementing the scenario generator function.
-Use the `WithScenario` function to pass the scenario name, number of executions, scenario generator function, scheduler registry, and scheduler options to the kube-scheduler-evaluator.
+Use the `WithScenario` function to pass the scenario name, number of executions, scenario generator function, scheduler registry, the scenario's run identity (for the transition record, see below), and scheduler options to the kube-scheduler-evaluator.
 
 For implementation details, refer to the [kube-scheduler-evaluator-reference](https://github.com/pfnet/kube-scheduler-evaluator-reference).
 
