@@ -75,13 +75,20 @@ func main() {
       etcdURL,
       false, // disable externalMode
       slogLevel,
+      // In internal execution mode, this is where the evaluator writes the transition
+      // record (one JSONL file per scenario run). Omit it in external mode, where this
+      // record is out of scope.
+      evaluator.WithRecordOutputDir(recordOutputDir),
     ),
     evaluator.WithMetricStores(
       definition.NewMetricStore(definition.VictoriaMetrics, victoriaMetricsURL),
     ),
-    // scenarioName, iteration, scenarioGenerator, schedulerRegistry, schedulerOptions
-    evaluator.WithScenario(scenarioName1, 3, scenarioGenerator1, nil),  // default-scheduler
-    evaluator.WithScenario(scenarioName2, 1, scenarioGenerator2, registry, scheduler.WithProfiles(profiles...)),  // your-custom-scheduler
+    // scenarioName, iteration, scenarioGenerator, schedulerRegistry, runIdentity, schedulerOptions
+    // runIdentity identifies each of this scenario's runs in the transition record:
+    // the evaluator does not know how the input was produced or how the scheduler
+    // profile was configured, so the caller supplies it.
+    evaluator.WithScenario(scenarioName1, 3, scenarioGenerator1, nil, runIdentity1),  // default-scheduler
+    evaluator.WithScenario(scenarioName2, 1, scenarioGenerator2, registry, runIdentity2, scheduler.WithProfiles(profiles...)),  // your-custom-scheduler
   )
   if err != nil {
     panic(err)

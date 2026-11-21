@@ -16,12 +16,17 @@ type Scenario interface {
 	NextEvent(context.Context) <-chan Event
 	SchedulerRegistry() runtime.Registry
 	SchedulerOptions() []scheduler.Option
+	// RunIdentity returns the information that identifies each run of this scenario
+	// in the transition record (research.md section 11.5). The evaluator cannot derive
+	// this itself: it does not know how the input was produced or how the scheduler
+	// profile was configured, so the caller supplies it.
+	RunIdentity() RunIdentity
 }
 
 // NewScenario creates a new Scenario instance.
 func NewScenario(
 	scenarioID string, iteration int, generator func(chan<- Event),
-	registry runtime.Registry, opts ...scheduler.Option,
+	registry runtime.Registry, identity RunIdentity, opts ...scheduler.Option,
 ) Scenario {
 	matched, err := regexp.MatchString(`^[a-zA-Z][a-zA-Z0-9-]*$`, scenarioID)
 	if err != nil {
@@ -36,6 +41,7 @@ func NewScenario(
 		generator:         generator,
 		schedulerRegistry: registry,
 		schedulerOptions:  opts,
+		runIdentity:       identity,
 	}
 }
 
@@ -45,6 +51,7 @@ type scenario struct {
 	generator         func(chan<- Event)
 	schedulerRegistry runtime.Registry
 	schedulerOptions  []scheduler.Option
+	runIdentity       RunIdentity
 }
 
 func (s *scenario) ScenarioID() string {
@@ -72,4 +79,8 @@ func (s *scenario) SchedulerRegistry() runtime.Registry {
 
 func (s *scenario) SchedulerOptions() []scheduler.Option {
 	return s.schedulerOptions
+}
+
+func (s *scenario) RunIdentity() RunIdentity {
+	return s.runIdentity
 }

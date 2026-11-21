@@ -130,6 +130,9 @@ func (m *manager) ProcessEvent(ctx context.Context, e event.Event) error {
 		// If the object to be deleted is a Pod and has an owner, delete the owner instead.
 		// The garbage collector will then delete the Pod.
 		// Assuming the owner has only one Pod.
+		if m.podRecorder != nil && e.IsCompletion() {
+			m.podRecorder.MarkCompletion(util.ResourceKeyOf(obj))
+		}
 		ownerGVK := schema.FromAPIVersionAndKind(ownerRef.APIVersion, ownerRef.Kind)
 		ownerObj := &unstructured.Unstructured{}
 		ownerObj.SetGroupVersionKind(ownerGVK)
