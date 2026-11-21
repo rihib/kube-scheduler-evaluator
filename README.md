@@ -197,6 +197,34 @@ func scenarioGenerator1(ch chan<- Event) {
 }
 ```
 
+## Transition record
+
+In internal execution mode, the evaluator writes one JSONL file per scenario
+run to the folder given by `evaluator.WithRecordOutputDir`. The first line
+identifies the run: the input, the evaluator's and the caller's commits, the
+machine, the scheduler profile and the iteration. Every line after it is one
+transition of one mutable state, carrying the virtual time of the event that
+caused it and a sequence number that orders transitions sharing a virtual time.
+
+Each transition names the operation that caused it. The operation names are
+English identifiers; the model they come from (research.md section 11.5) names
+them in Japanese:
+
+| operation | research.md | Cause |
+| --- | --- | --- |
+| `create_task` | タスクを作る | A ReplicaSet gets its first Pod |
+| `recreate` | 再作成する | A resync recreates a deleted Pod |
+| `assign_node` | 実行先ノードを割り当てる | The Pod is bound to a node |
+| `start` | 実行を開始する | Binding, at the `assign_node` time |
+| `complete` | 完了する | The execution duration has elapsed |
+| `delete` | 削除する | The scenario deletes it, or preemption |
+| `release` | リソースを解放する | A `complete` or a `delete` frees them |
+| `register_node` | ノードを登録する | The scenario creates a node |
+| `deregister_node` | ノードを削除する | The scenario deletes a node |
+
+Operations the evaluator cannot cause are out of scope: they are recorded when the
+evaluator gains the ability to cause them.
+
 ## `externalMode`
 
 ![externalMode](./docs/images/ext.png)
