@@ -595,6 +595,15 @@ func splitRuns(lines []map[string]any) [][]map[string]any {
 // The Node has a fixed name rather than a GenerateName, so that a Node left behind by
 // the previous run is not merely invisible in the record but makes the second run's
 // Node creation fail outright with an already-exists error.
+//
+// What this guards and what it does not: the fixed Node name guards the Node side, where
+// state left behind by the previous run is observable from outside. The Pod side is not
+// guarded. The Pod recorder keys its per-run maps on the Pod's namespace/name and on the
+// owner ReplicaSet's UID, and the fake API server gives every Pod a random name
+// (GenerateName + rand.String) and a fresh UID, so entries left over from the first run
+// can never be hit by the second one. Leaking those maps across runs is therefore
+// unobservable here, and a run's record stays correct either way; guarding it would mean
+// injecting the maps or pinning the Pod names, which this test deliberately does not do.
 func TestRun_EachIterationRecordsItsOwnRun(t *testing.T) {
 	const nodeName = "repeated-run-node"
 	w := &fakeRecordWriter{}
