@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"runtime/debug"
 	"strings"
@@ -60,8 +61,9 @@ const evaluatorModulePath = "github.com/pfnet/kube-scheduler-evaluator"
 // When the evaluator is only a dependency (the reference repository's case,
 // decisions.md), debug.ReadBuildInfo's vcs.revision is the CALLER's commit, not the
 // evaluator's: the evaluator's own commit is instead the pseudo-version this module is
-// pinned to in the caller's build (info.Deps), per units/U01.md's requirement that
-// evaluator_commit and reference_commit be distinguishable.
+// pinned to in the caller's build (info.Deps, see evaluatorCommitFrom), per
+// units/U01.md's requirement that evaluator_commit and reference_commit be
+// distinguishable.
 //
 // When the evaluator itself is the main module, vcs.revision is usable, except in a
 // "go test" binary, which does not carry one; that case falls back to asking git
@@ -69,17 +71,12 @@ const evaluatorModulePath = "github.com/pfnet/kube-scheduler-evaluator"
 // evaluator's own repository.
 func EvaluatorCommit() (string, error) {
 	if info, ok := debug.ReadBuildInfo(); ok {
-		if info.Main.Path == evaluatorModulePath {
-			if rev, found := vcsRevision(info.Settings); found {
-				return rev, nil
-			}
-		} else {
-			for _, dep := range info.Deps {
-				if dep.Path == evaluatorModulePath {
-					return dep.Version, nil
-				}
-			}
-			return "", fmt.Errorf("record.EvaluatorCommit: %s is not among the main module %s's dependencies", evaluatorModulePath, info.Main.Path)
+		commit, found, err := evaluatorCommitFrom(info)
+		if err != nil {
+			return "", err
+		}
+		if found {
+			return commit, nil
 		}
 	}
 	out, err := exec.Command("git", "rev-parse", "HEAD").Output()
@@ -90,9 +87,48 @@ func EvaluatorCommit() (string, error) {
 }
 
 // evaluatorCommitFrom reads the evaluator's own commit out of one build information
-// value. found is false when the build information does not carry it at all.
+// value. found is false when the build information does not carry the commit even
+// though nothing is wrong with it, which happens in a "go test" binary of this module.
 func evaluatorCommitFrom(info *debug.BuildInfo) (commit string, found bool, err error) {
-	return "", false, nil
+	if info.Main.Path == evaluatorModulePath {
+		rev, ok := vcsRevision(info.Settings)
+		return rev, ok, nil
+	}
+	for _, dep := range info.Deps {
+		if dep.Path != evaluatorModulePath {
+			continue
+		}
+		// The reference pins the fork of this module, whose repository URL differs from
+		// this module's path, so it needs a replace directive (decisions.md). The
+		// version that identifies the commit is then the replacement's: the required
+		// version is whatever satisfied the module graph, or the placeholder the go
+		// command writes when only the replace directive brings the module in.
+		version := dep.Version
+		if dep.Replace != nil {
+			version = dep.Replace.Version
+		}
+		if !isPseudoVersion(version) {
+			return "", false, fmt.Errorf(
+				"record.EvaluatorCommit: the main module %s pins %s at %q, which identifies no commit; decisions.md requires a pseudo-version of the evaluator fork's commit",
+				info.Main.Path, evaluatorModulePath, version)
+		}
+		return version, true, nil
+	}
+	return "", false, fmt.Errorf("record.EvaluatorCommit: %s is not among the main module %s's dependencies", evaluatorModulePath, info.Main.Path)
+}
+
+// pseudoVersionPattern matches a Go pseudo-version, whose last two fields are the
+// commit's timestamp and the 12-character prefix of its hash (golang.org/ref/mod).
+var pseudoVersionPattern = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?-[0-9]{14}-[0-9a-f]{12}$`)
+
+// placeholderPseudoVersion is the pseudo-version shape the go command writes for a
+// module that only a replace directive brings into the build. It parses as a
+// pseudo-version but points at no commit.
+const placeholderPseudoVersion = "v0.0.0-00010101000000-000000000000"
+
+// isPseudoVersion reports whether version identifies a commit of this module.
+func isPseudoVersion(version string) bool {
+	return version != placeholderPseudoVersion && pseudoVersionPattern.MatchString(version)
 }
 
 func vcsRevision(settings []debug.BuildSetting) (string, bool) {
