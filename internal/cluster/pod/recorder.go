@@ -13,8 +13,8 @@ import (
 	"github.com/pfnet/kube-scheduler-evaluator/internal/record"
 	"github.com/pfnet/kube-scheduler-evaluator/internal/util"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	resourcehelper "k8s.io/component-helpers/resource"
 )
 
 // Recorder records the transitions of Pods in internal mode.
@@ -145,38 +145,28 @@ func taskImmutableOf(pod *corev1.Pod, taskID string) record.TaskImmutable {
 		Owner:               "", // Kubernetes has no attribute for this (research.md section 10.2).
 		Group:               pod.Namespace,
 		JobID:               taskID,
-		ResourceRequest:     sumContainerResources(pod.Spec.Containers, requestsOf),
-		ResourceLimit:       sumContainerResources(pod.Spec.Containers, limitsOf),
+		ResourceRequest:     resourceMapOf(resourcehelper.PodRequests(pod, podResourceOptions)),
+		ResourceLimit:       resourceMapOf(resourcehelper.PodLimits(pod, podResourceOptions)),
 		PlacementConstraint: constraint,
 		Priority:            priority,
 	}
 }
 
-func requestsOf(c corev1.Container) corev1.ResourceList { return c.Resources.Requests }
-func limitsOf(c corev1.Container) corev1.ResourceList   { return c.Resources.Limits }
+// podResourceOptions makes resourcehelper compute a Pod's resources the way
+// kube-scheduler does for the node it is placed on
+// (scheduler/framework.NodeInfo's calculateResource), with the feature gates this
+// experiment runs with: no in-place vertical scaling (so the spec, not the status,
+// is authoritative) and no pod-level resources.
+var podResourceOptions = resourcehelper.PodResourcesOptions{SkipPodLevelResources: true}
 
-// sumContainerResources sums the resource list selected by get across all of a Pod's
-// containers, so that a multi-container Pod's immutable state and allocated_resource
-// reflect what the scheduler actually reserves on the node, not just its first
-// container. Init containers are not included: they do not run alongside the regular
-// containers, so the scheduler does not hold their resources for the Pod's whole run.
-func sumContainerResources(containers []corev1.Container, get func(corev1.Container) corev1.ResourceList) map[string]string {
-	sums := make(map[corev1.ResourceName]resource.Quantity)
-	for _, c := range containers {
-		for name, qty := range get(c) {
-			if existing, ok := sums[name]; ok {
-				existing.Add(qty)
-				sums[name] = existing
-			} else {
-				sums[name] = qty.DeepCopy()
-			}
-		}
-	}
-	if len(sums) == 0 {
+// resourceMapOf renders a resource list as the record's string-keyed map, or nil when
+// the Pod asks for nothing.
+func resourceMapOf(list corev1.ResourceList) map[string]string {
+	if len(list) == 0 {
 		return nil
 	}
-	m := make(map[string]string, len(sums))
-	for name, qty := range sums {
+	m := make(map[string]string, len(list))
+	for name, qty := range list {
 		m[string(name)] = qty.String()
 	}
 	return m
@@ -201,12 +191,16 @@ func (r *Recorder) PodScheduled(pod *corev1.Pod) {
 }
 
 // allocatedResourceOf returns the resources a bound Pod holds on its node
-// (research.md section 10.5's allocated_resource, keyed by instance_id), taken from its
-// requests. Neither units/U01.md nor decisions.md models an instance's allocation
-// changing after it is assigned a node, and this pilot's scenarios never resize a
-// running Pod, so requests at bind time are the instance's allocation for the whole run.
+// (research.md section 10.5's allocated_resource, keyed by instance_id). It is the
+// Pod's request as kube-scheduler computes it, so that the record says what the
+// scheduler actually reserved on the node: the sum over the regular containers, or the
+// largest init container if that is bigger, plus the Pod's overhead.
+//
+// Neither units/U01.md nor decisions.md models an instance's allocation changing after
+// it is assigned a node, and this pilot's scenarios never resize a running Pod, so the
+// request at bind time is the instance's allocation for the whole run.
 func allocatedResourceOf(pod *corev1.Pod) map[string]string {
-	return sumContainerResources(pod.Spec.Containers, requestsOf)
+	return resourceMapOf(resourcehelper.PodRequests(pod, podResourceOptions))
 }
 
 // PodDeleted is called after the fake API server has deleted a Pod.
