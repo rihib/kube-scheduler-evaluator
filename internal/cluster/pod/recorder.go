@@ -155,8 +155,10 @@ func taskImmutableOf(pod *corev1.Pod, taskID string) record.TaskImmutable {
 // podResourceOptions makes resourcehelper compute a Pod's resources the way
 // kube-scheduler does for the node it is placed on
 // (scheduler/framework.NodeInfo's calculateResource), with the feature gates this
-// experiment runs with: no in-place vertical scaling (so the spec, not the status,
-// is authoritative) and no pod-level resources.
+// experiment runs with. SkipPodLevelResources is set explicitly because PodLevelResources
+// is disabled. In-place vertical scaling is also disabled, which resourcehelper's default
+// already matches: UseStatusResources stays false, so the spec, not the status, is
+// authoritative.
 var podResourceOptions = resourcehelper.PodResourcesOptions{SkipPodLevelResources: true}
 
 // resourceMapOf renders a resource list as the record's string-keyed map, or nil when
