@@ -296,9 +296,9 @@ func (m *manager) write(op, componentID, taskID, state, stateKey string, before,
 	if m.writer == nil {
 		// Every transition belongs to a run (Manager's doc comment), so reaching this
 		// without an open run is a bug in the caller. There is no caller to return an
-		// error to (the fake API server's reactors discard it), so log the dropped
-		// line rather than letting the record lose it without a trace. The gap it
-		// leaves in seq is visible in the surrounding run's file.
+		// error to (the fake API server's reactors discard it), and no file to leave a
+		// trace in either: BeginRun restarts seq at 0, so a line dropped between runs
+		// leaves no gap in any run's record. This log is the only evidence of it.
 		slog.Error("record.write: dropped a transition because no run is open",
 			"operation", op, "seq", t.Seq, "componentID", componentID, "state", state)
 		return
