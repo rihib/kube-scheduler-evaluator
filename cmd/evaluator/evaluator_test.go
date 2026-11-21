@@ -550,3 +550,67 @@ func TestRun_FailsWhenTheRecordWriterFails(t *testing.T) {
 		t.Errorf("the writer accepted %d lines, want only the header line", len(lines))
 	}
 }
+
+// splitRuns splits the lines written by a scenario with more than one iteration into
+// one slice per run, each starting with that run's header line. A header line is the
+// only line without an operation.
+func splitRuns(lines []map[string]any) [][]map[string]any {
+	var runs [][]map[string]any
+	for _, l := range lines {
+		if _, isTransition := l["operation"]; !isTransition {
+			runs = append(runs, []map[string]any{l})
+			continue
+		}
+		if len(runs) == 0 {
+			continue // a transition before any header: left to the caller's assertions
+		}
+		runs[len(runs)-1] = append(runs[len(runs)-1], l)
+	}
+	return runs
+}
+
+// TestRun_EachIterationRecordsItsOwnRun covers a scenario run twice in one process
+// (units/U01.md: one record per run). Each run starts from an empty cluster, so each
+// run's record carries the whole of the cluster's state at the start of its own
+// observation period: the Node is registered again, and the Pod's lifecycle is recorded
+// again from create_task to complete.
+//
+// The Node has a fixed name rather than a GenerateName, so that a Node left behind by
+// the previous run is not merely invisible in the record but makes the second run's
+// Node creation fail outright with an already-exists error.
+func TestRun_EachIterationRecordsItsOwnRun(t *testing.T) {
+	const nodeName = "repeated-run-node"
+	w := &fakeRecordWriter{}
+	code := runEvaluatorExitCode(t, w, 2, func(ch chan<- definition.Event) {
+		node := testNode("4", "8Gi")
+		node.Name = nodeName
+		ch <- definition.NewEvent(definition.EventTypeCreate, node, 0)
+		ch <- definition.NewEvent(definition.EventTypeCreate, testReplicaSet("job", "1", 0, 10*time.Second), 0)
+	})
+	if code != 0 {
+		t.Fatalf("evaluator.Run: exit code %d, want 0", code)
+	}
+
+	runs := splitRuns(w.linesCopy())
+	if len(runs) != 2 {
+		t.Fatalf("got %d runs in the record, want 2 (one header line per run)", len(runs))
+	}
+	for i, lines := range runs {
+		header := lines[0]
+		if got := mustFloat(t, header["iteration"], "header.iteration"); got != float64(i) {
+			t.Errorf("run %d: header.iteration = %v, want %d", i, header["iteration"], i)
+		}
+		if got := findTransitions(lines, "register_node", nodeName); len(got) == 0 {
+			t.Errorf("run %d: no register_node record for node %s: %v", i, nodeName, lines)
+		}
+		createRecords := findTransitions(lines, "create_task", "")
+		if len(createRecords) == 0 {
+			t.Fatalf("run %d: no create_task record: %v", i, lines)
+		}
+		instanceID, _ := createRecords[0]["component_id"].(string)
+		if got := findTransitions(lines, "complete", instanceID); len(got) == 0 {
+			t.Errorf("run %d: instance %s has no complete record; the Pod ran to the end of its execution duration: %v",
+				i, instanceID, lines)
+		}
+	}
+}
