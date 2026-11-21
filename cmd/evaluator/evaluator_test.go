@@ -434,6 +434,22 @@ func TestRun_NormalLifecycle(t *testing.T) {
 		if !ok || req["cpu"] != "1" {
 			t.Errorf("task_immutable.resource_request.cpu = %v, want 1", imm["resource_request"])
 		}
+		limit, ok := imm["resource_limit"].(map[string]any)
+		if !ok || limit["cpu"] != "1" {
+			t.Errorf("task_immutable.resource_limit.cpu = %v, want 1", imm["resource_limit"])
+		}
+		// One openb row is one job holding exactly one task (units/U01.md), so the job
+		// is identified by the task itself.
+		if imm["job_id"] != withImmutable["task_id"] {
+			t.Errorf("task_immutable.job_id = %v, want the task's own id %v", imm["job_id"], withImmutable["task_id"])
+		}
+		if got := mustFloat(t, imm["priority"], "task_immutable.priority"); got != 0 {
+			t.Errorf("task_immutable.priority = %v, want 0", imm["priority"])
+		}
+		// This Pod has no node selector, so it carries no placement constraint.
+		if constraint, ok := imm["placement_constraint"]; ok {
+			t.Errorf("task_immutable.placement_constraint = %v, want it to be absent", constraint)
+		}
 	})
 }
 
@@ -724,5 +740,39 @@ func TestNew_RequiresAPlaceToWriteTheRecordInInternalMode(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "WithRecordOutputDir") {
 		t.Errorf("evaluator.New error = %q, want it to name the option to set", err)
+	}
+}
+
+// TestRun_RecordsThePodsPriorityAndNodeSelector covers the rest of the task's immutable
+// state (units/U01.md): the Pod's priority, and its node selector as the task's
+// placement_constraint (research.md section 10.2).
+func TestRun_RecordsThePodsPriorityAndNodeSelector(t *testing.T) {
+	lines := runEvaluator(t, func(ch chan<- definition.Event) {
+		rs := testReplicaSet("constrained", "1", 7, 10*time.Second)
+		// testNode labels its nodes zone=a, so the Pod still has somewhere to go.
+		rs.Spec.Template.Spec.NodeSelector = map[string]string{"zone": "a"}
+		ch <- definition.NewEvent(definition.EventTypeCreate, testNode("4", "8Gi"), 0)
+		ch <- definition.NewEvent(definition.EventTypeCreate, rs, 0)
+	})
+
+	var imm map[string]any
+	for _, r := range findTransitions(lines, "create_task", "") {
+		if m, ok := r["task_immutable"].(map[string]any); ok {
+			imm = m
+			break
+		}
+	}
+	if imm == nil {
+		t.Fatalf("no create_task record carries task_immutable: %v", lines)
+	}
+	if got := mustFloat(t, imm["priority"], "task_immutable.priority"); got != 7 {
+		t.Errorf("task_immutable.priority = %v, want 7", imm["priority"])
+	}
+	constraint, ok := imm["placement_constraint"].(map[string]any)
+	if !ok {
+		t.Fatalf("task_immutable.placement_constraint = %v, want a map", imm["placement_constraint"])
+	}
+	if constraint["zone"] != "a" {
+		t.Errorf("task_immutable.placement_constraint.zone = %v, want a", constraint["zone"])
 	}
 }
