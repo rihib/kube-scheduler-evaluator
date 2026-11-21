@@ -89,6 +89,12 @@ func EvaluatorCommit() (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// evaluatorCommitFrom reads the evaluator's own commit out of one build information
+// value. found is false when the build information does not carry it at all.
+func evaluatorCommitFrom(info *debug.BuildInfo) (commit string, found bool, err error) {
+	return "", false, nil
+}
+
 func vcsRevision(settings []debug.BuildSetting) (string, bool) {
 	for _, s := range settings {
 		if s.Key == "vcs.revision" {
