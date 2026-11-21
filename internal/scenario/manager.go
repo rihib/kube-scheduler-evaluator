@@ -2,6 +2,7 @@ package scenario
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -58,11 +59,17 @@ type manager struct {
 
 type nextEventDefinitionFn func(context.Context) <-chan definition.Event
 
-func (m *manager) Run(ctx context.Context) error {
+// Run runs one iteration of the scenario. The returned error joins the scenario's own
+// error with the error of stopping the cluster, which closes this run's transition
+// record: a run whose record is incomplete must not be reported as a success
+// (cluster.StopCluster), and neither failure may hide the other.
+func (m *manager) Run(ctx context.Context) (err error) {
 	slog.InfoContext(ctx, "start new scenario")
 
 	// Stop the informers and the scheduler of this run, so that they do not record the following runs.
-	defer cluster.StopCluster(ctx, m.resourceManager)
+	defer func() {
+		err = errors.Join(err, cluster.StopCluster(ctx, m.resourceManager))
+	}()
 	if !m.consts.IsExternalMode() {
 		if err := cluster.InitCluster(ctx, m.resourceManager, m.schedulerRegistry, m.schedulerOptions, m.runIdentity); err != nil {
 			return err

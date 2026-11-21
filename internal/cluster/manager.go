@@ -165,7 +165,12 @@ func InitCluster(
 // StopCluster stops the informers and the scheduler started for the current run.
 // It must be called at the end of each run, so that the informers and the pod manager of the run
 // do not keep recording the Pods of the following runs.
-func StopCluster(ctx context.Context, mng Manager) {
+//
+// It returns the error of closing the run's transition record. A run whose record lost
+// lines is not a record of the run that happened, and nothing downstream can tell the
+// difference (U04 aggregates it as if it were complete), so the caller must fail the
+// run instead of reporting success.
+func StopCluster(ctx context.Context, mng Manager) error {
 	var m *manager
 	switch v := mng.(type) {
 	case *manager:
@@ -173,15 +178,16 @@ func StopCluster(ctx context.Context, mng Manager) {
 	case *managerExternalMode:
 		m = v.manager
 	default:
-		return
+		return nil
 	}
 	m.stopRun()
 	if m.recordManager != nil {
 		if err := m.recordManager.EndRun(); err != nil {
-			slog.ErrorContext(ctx, "cluster.StopCluster: failed to close the transition record", "error", err)
+			return fmt.Errorf("cluster.StopCluster: failed to close the transition record: %w", err)
 		}
 	}
 	slog.DebugContext(ctx, "cluster stopped")
+	return nil
 }
 
 // beginRun stops the previous run if it is still running, and returns the context of a new run.
