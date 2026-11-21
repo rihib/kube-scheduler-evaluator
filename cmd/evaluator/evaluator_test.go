@@ -3,6 +3,7 @@ package evaluator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"sync"
 	"testing"
@@ -21,10 +22,18 @@ const testUserID = "tester"
 // fakeRecordWriter is the Fake writer used by the unit tests below (units/U01.md:
 // "記録の書き出し先...は、evaluator を作るときに外から渡せるようにする...テストで Fake を渡すため").
 // It keeps the written lines as parsed JSON objects, in order, instead of writing a file.
+//
+// failFromLine, when positive, makes WriteLine fail from that line onwards (1 is the
+// header line), standing in for a writer that stops accepting lines mid-run, such as a
+// full disk.
 type fakeRecordWriter struct {
+	failFromLine int
+
 	mu    sync.Mutex
 	lines []map[string]any
 }
+
+var errFakeWriteFailure = errors.New("fake writer: out of space")
 
 func (w *fakeRecordWriter) WriteLine(v any) error {
 	b, err := json.Marshal(v)
@@ -37,6 +46,9 @@ func (w *fakeRecordWriter) WriteLine(v any) error {
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.failFromLine > 0 && len(w.lines)+1 >= w.failFromLine {
+		return errFakeWriteFailure
+	}
 	w.lines = append(w.lines, m)
 	return nil
 }
@@ -51,21 +63,22 @@ func (w *fakeRecordWriter) linesCopy() []map[string]any {
 	return out
 }
 
-// newFakeRecordSetup returns a config carrying Fakes for the record's writer,
-// evaluator commit and hardware info (units/U01.md), and the single writer the
-// factory will hand back for the one run each test below performs.
-func newFakeRecordSetup() (ConfigOption, ConfigOption, ConfigOption, *fakeRecordWriter) {
-	w := &fakeRecordWriter{}
-	writerOpt := WithRecordWriterFactory(func(RecordRunInfo) (RecordWriter, error) {
-		return w, nil
-	})
-	commitOpt := WithCommitProvider(func() (string, error) {
-		return "fake-evaluator-commit", nil
-	})
-	hwOpt := WithHardwareInfoProvider(func() (string, error) {
-		return "fake-hardware", nil
-	})
-	return writerOpt, commitOpt, hwOpt, w
+// fakeRecordOptions returns the config options carrying Fakes for the record's writer,
+// the evaluator commit and the hardware info (units/U01.md). Every run of the scenario
+// is handed the same writer, so that a scenario with more than one iteration leaves the
+// lines of all of its runs in one place, each run starting with its own header line.
+func fakeRecordOptions(w *fakeRecordWriter) []ConfigOption {
+	return []ConfigOption{
+		WithRecordWriterFactory(func(RecordRunInfo) (RecordWriter, error) {
+			return w, nil
+		}),
+		WithCommitProvider(func() (string, error) {
+			return "fake-evaluator-commit", nil
+		}),
+		WithHardwareInfoProvider(func() (string, error) {
+			return "fake-hardware", nil
+		}),
+	}
 }
 
 func testNode(cpu, mem string) *corev1.Node {
@@ -147,22 +160,29 @@ func testIdentity() definition.RunIdentity {
 	}
 }
 
-func runEvaluator(t *testing.T, opts []ConfigOption, generator func(chan<- definition.Event)) []map[string]any {
+// runEvaluatorExitCode runs the scenario the given number of iterations with w as the
+// record's writer, and returns the exit code of the run.
+func runEvaluatorExitCode(t *testing.T, w *fakeRecordWriter, iteration int, generator func(chan<- definition.Event)) int {
 	t.Helper()
-	writerOpt, commitOpt, hwOpt, w := newFakeRecordSetup()
-	allOpts := append([]ConfigOption{writerOpt, commitOpt, hwOpt}, opts...)
-	cfg := WithConfig(testUserID, "", "", "", false, slog.LevelError, allOpts...)
+	cfg := WithConfig(testUserID, "", "", "", false, slog.LevelError, fakeRecordOptions(w)...)
 	eval, err := New(
 		cfg,
 		WithMetricStores(),
-		WithScenario("test", 1, generator, nil, testIdentity()),
+		WithScenario("test", iteration, generator, nil, testIdentity()),
 	)
 	if err != nil {
 		t.Fatalf("evaluator.New: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if code := eval.Run(ctx); code != 0 {
+	return eval.Run(ctx)
+}
+
+// runEvaluator runs the scenario once and returns the lines of the record it wrote.
+func runEvaluator(t *testing.T, generator func(chan<- definition.Event)) []map[string]any {
+	t.Helper()
+	w := &fakeRecordWriter{}
+	if code := runEvaluatorExitCode(t, w, 1, generator); code != 0 {
 		t.Fatalf("evaluator.Run: exit code %d", code)
 	}
 	return w.linesCopy()
@@ -214,7 +234,7 @@ func mustFloat(t *testing.T, v any, what string) float64 {
 // TestRun_NormalLifecycle covers a Pod that is created, placed, started and completed
 // without contention: create_task, assign_node, start, complete and release.
 func TestRun_NormalLifecycle(t *testing.T) {
-	lines := runEvaluator(t, nil, func(ch chan<- definition.Event) {
+	lines := runEvaluator(t, func(ch chan<- definition.Event) {
 		ch <- definition.NewEvent(definition.EventTypeCreate, testNode("4", "8Gi"), 0)
 		ch <- definition.NewEvent(definition.EventTypeCreate, testReplicaSet("job", "1", 0, 10*time.Second), 0)
 	})
@@ -260,27 +280,27 @@ func TestRun_NormalLifecycle(t *testing.T) {
 	})
 
 	t.Run("register_node records the node's labels as node_attribute", func(t *testing.T) {
-			attributeRecords := findTransitions(lines, "register_node", "")
-			found := false
-			for _, r := range attributeRecords {
-				if r["state"] != "node_attribute" {
-					continue
-				}
-				found = true
-				after, ok := r["after"].(map[string]any)
-				if !ok {
-					t.Fatalf("register_node node_attribute after = %v, want a map", r["after"])
-				}
-				if after["zone"] != "a" {
-					t.Errorf("registered node_attribute zone = %v, want a", after["zone"])
-				}
+		attributeRecords := findTransitions(lines, "register_node", "")
+		found := false
+		for _, r := range attributeRecords {
+			if r["state"] != "node_attribute" {
+				continue
 			}
-			if !found {
-				t.Fatalf("no register_node node_attribute record found in %v", attributeRecords)
+			found = true
+			after, ok := r["after"].(map[string]any)
+			if !ok {
+				t.Fatalf("register_node node_attribute after = %v, want a map", r["after"])
 			}
-		})
+			if after["zone"] != "a" {
+				t.Errorf("registered node_attribute zone = %v, want a", after["zone"])
+			}
+		}
+		if !found {
+			t.Fatalf("no register_node node_attribute record found in %v", attributeRecords)
+		}
+	})
 
-		t.Run("register_node records the node's capacity at the start", func(t *testing.T) {
+	t.Run("register_node records the node's capacity at the start", func(t *testing.T) {
 		capacityRecords := findTransitions(lines, "register_node", "")
 		found := false
 		for _, r := range capacityRecords {
@@ -423,7 +443,7 @@ func TestRun_NodeDeregistration(t *testing.T) {
 	node.Name = "deregistration-test-node"
 	deleted := node.DeepCopy()
 
-	lines := runEvaluator(t, nil, func(ch chan<- definition.Event) {
+	lines := runEvaluator(t, func(ch chan<- definition.Event) {
 		ch <- definition.NewEvent(definition.EventTypeCreate, node, 0)
 		ch <- definition.NewEvent(definition.EventTypeDelete, deleted, time.Second)
 	})
@@ -453,7 +473,7 @@ func TestRun_NodeDeregistration(t *testing.T) {
 // run to the end of its execution duration), and the ReplicaSet's resync creates a new
 // instance of the same task, recorded as "recreate".
 func TestRun_PreemptionCausesDeleteAndRecreate(t *testing.T) {
-	lines := runEvaluator(t, nil, func(ch chan<- definition.Event) {
+	lines := runEvaluator(t, func(ch chan<- definition.Event) {
 		ch <- definition.NewEvent(definition.EventTypeCreate, testNode("1", "8Gi"), 0)
 		ch <- definition.NewEvent(definition.EventTypeCreate, testReplicaSet("low", "1", 0, time.Hour), 0)
 		ch <- definition.NewEvent(definition.EventTypeCreate, testReplicaSet("high", "1", 100, time.Hour), time.Second)
@@ -508,5 +528,25 @@ func TestRun_PreemptionCausesDeleteAndRecreate(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("no recreate record found for task %s after it was preempted: %v", taskID, recreateRecords)
+	}
+}
+
+// TestRun_FailsWhenTheRecordWriterFails covers a writer that stops accepting lines in
+// the middle of a run (a full disk, say): the run must report failure, because a record
+// missing some of its transitions is not a record of the run that happened, and the
+// aggregation that reads it later cannot tell the difference (units/U01.md).
+func TestRun_FailsWhenTheRecordWriterFails(t *testing.T) {
+	// Fail from the first transition line, keeping the header line written, so the run
+	// gets as far as producing transitions before the writer starts refusing them.
+	w := &fakeRecordWriter{failFromLine: 2}
+	code := runEvaluatorExitCode(t, w, 1, func(ch chan<- definition.Event) {
+		ch <- definition.NewEvent(definition.EventTypeCreate, testNode("4", "8Gi"), 0)
+		ch <- definition.NewEvent(definition.EventTypeCreate, testReplicaSet("job", "1", 0, 10*time.Second), 0)
+	})
+	if code == 0 {
+		t.Errorf("evaluator.Run: exit code 0, want non-zero when the record writer fails")
+	}
+	if lines := w.linesCopy(); len(lines) != 1 {
+		t.Errorf("the writer accepted %d lines, want only the header line", len(lines))
 	}
 }
