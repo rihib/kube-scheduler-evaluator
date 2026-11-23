@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strconv"
+	"sync/atomic"
 
 	jsonpatch "github.com/evanphx/json-patch"
 	"github.com/pfnet/kube-scheduler-evaluator/internal/cluster/pod"
@@ -20,6 +22,33 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 )
 
+// resourceVersionStamper gives every Create and Update on the fake API server a fresh,
+// monotonically increasing ResourceVersion.
+//
+// The fake clientset (k8s.io/client-go/kubernetes/fake) never sets ResourceVersion on
+// its own: its ObjectTracker does not manage it. client-go's SharedIndexInformer relies
+// on ResourceVersion to tell a genuine Update from a periodic resync
+// (sharedIndexInformer.OnUpdate treats an update as a resync whenever the old and new
+// object have the same ResourceVersion), and sharedProcessor.distribute then delivers a
+// resync only to listeners currently due for their own resync (shouldResync) — silently
+// dropping it for every other listener. With every ResourceVersion left at "",
+// OnUpdate's comparison is always equal, so every Update looks like a resync, and a
+// listener not due for resync (such as a scheduler event handler, soon after it
+// registers, until its own resync period elapses) never sees it. A run on the openb
+// scale (around 5800 Pods) runs long enough to cross that window, so a Pod's bind
+// update is silently dropped, the Pod stays "assumed" in the scheduler cache forever,
+// and the run times out waiting for the scheduler to stabilize. A run that finishes
+// before the window never hits it, which is why this stayed unnoticed below that scale.
+type resourceVersionStamper struct {
+	next atomic.Uint64
+}
+
+// stamp sets a fresh ResourceVersion on obj, distinct from every ResourceVersion this
+// stamper has set before.
+func (s *resourceVersionStamper) stamp(obj metav1.Object) {
+	obj.SetResourceVersion(strconv.FormatUint(s.next.Add(1), 10))
+}
+
 func prependDebugReactor(client *fakeclientset.Clientset) {
 	client.PrependReactor("*", "*", func(action k8stesting.Action) (handled bool, ret runtime.Object, err error) {
 		slog.Debug("API action detected",
@@ -32,7 +61,7 @@ func prependDebugReactor(client *fakeclientset.Clientset) {
 	})
 }
 
-func prependObjectCreationReactor(client *fakeclientset.Clientset, resource string) {
+func prependObjectCreationReactor(client *fakeclientset.Clientset, resource string, rv *resourceVersionStamper) {
 	// This reactor is called in main goroutine when client.Create is called
 	client.Fake.PrependReactor("create", resource, func(action k8stesting.Action) (handled bool, ret runtime.Object, err error) {
 		createAction, ok := action.(k8stesting.CreateAction)
@@ -61,6 +90,7 @@ func prependObjectCreationReactor(client *fakeclientset.Clientset, resource stri
 				pod.CreationTimestamp = metav1.Now()
 			}
 		}
+		rv.stamp(accessor)
 		return false, nil, nil
 	})
 }
@@ -168,7 +198,7 @@ func attributeOf(node *corev1.Node) map[string]string {
 	return attribute
 }
 
-func prependPodBindingReactor(client *fakeclientset.Clientset, recorder *pod.Recorder) {
+func prependPodBindingReactor(client *fakeclientset.Clientset, recorder *pod.Recorder, rv *resourceVersionStamper) {
 	// This reactor is called in scheduler goroutine when scheduler tries to bind a Pod
 	client.PrependReactor("create", "pods/binding", func(action k8stesting.Action) (handled bool, ret runtime.Object, err error) {
 		createAction, ok := action.(k8stesting.CreateAction)
@@ -209,6 +239,7 @@ func prependPodBindingReactor(client *fakeclientset.Clientset, recorder *pod.Rec
 		// The virtual clock does not advance until WaitForScheduler sees the binding in the scheduler cache,
 		// so the virtual time here is that of the event which made the Pod schedulable.
 		recorder.PodScheduled(pod)
+		rv.stamp(pod)
 		if err = client.Tracker().Update(gvr, pod, binding.Namespace); err != nil {
 			return true, nil, err
 		}
@@ -217,7 +248,7 @@ func prependPodBindingReactor(client *fakeclientset.Clientset, recorder *pod.Rec
 	})
 }
 
-func prependPodPatchReactor(client *fakeclientset.Clientset) {
+func prependPodPatchReactor(client *fakeclientset.Clientset, rv *resourceVersionStamper) {
 	// This reactor is called in scheduler goroutine when scheduler patches a Pod (e.g., marking Unschedulable)
 	reactorPatch := func(action k8stesting.Action) (handled bool, ret runtime.Object, err error) {
 		pa, ok := action.(k8stesting.PatchAction)
@@ -236,6 +267,7 @@ func prependPodPatchReactor(client *fakeclientset.Clientset) {
 		}
 		slog.Debug("pod patched", "pod", pa.GetName())
 		pod := patchedObj
+		rv.stamp(pod)
 		if err := client.Tracker().Update(gvr, pod, pa.GetNamespace()); err != nil {
 			return true, nil, err
 		}

@@ -100,13 +100,14 @@ func (m *manager) resetFakeCluster() {
 	m.podRecorder = pod.NewRecorder(m.consts, m.metricManager, m.recordManager)
 
 	// PrependReactor puts a reactor in front of the chain, so the reactors registered later run earlier.
+	rv := &resourceVersionStamper{}
 	prependPodRecordReactor(fakeClient, m.podRecorder)
 	prependNodeRecordReactor(fakeClient, m.recordManager)
-	prependObjectCreationReactor(fakeClient, "nodes")
-	prependObjectCreationReactor(fakeClient, "pods")
-	prependObjectCreationReactor(fakeClient, "replicasets")
-	prependPodBindingReactor(fakeClient, m.podRecorder)
-	prependPodPatchReactor(fakeClient)
+	prependObjectCreationReactor(fakeClient, "nodes", rv)
+	prependObjectCreationReactor(fakeClient, "pods", rv)
+	prependObjectCreationReactor(fakeClient, "replicasets", rv)
+	prependPodBindingReactor(fakeClient, m.podRecorder, rv)
+	prependPodPatchReactor(fakeClient, rv)
 	prependDebugReactor(fakeClient)
 }
 
