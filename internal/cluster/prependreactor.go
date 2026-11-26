@@ -22,8 +22,9 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 )
 
-// resourceVersionStamper gives every Create and Update on the fake API server a fresh,
-// monotonically increasing ResourceVersion.
+// resourceVersionStamper gives each object written by the Create of nodes, pods and
+// replicasets, and by the bind and patch updates of a Pod, a fresh, monotonically
+// increasing ResourceVersion. Other updates are not stamped.
 //
 // The fake clientset (k8s.io/client-go/kubernetes/fake) never sets ResourceVersion on
 // its own: its ObjectTracker does not manage it. client-go's SharedIndexInformer relies
