@@ -18,6 +18,12 @@ type Event interface {
 	UnstructuredObject() *unstructured.Unstructured
 	VirtualTimestamp() time.Time
 	SetVirtualTimestamp(time.Time)
+	// IsCompletion reports whether this delete event represents a task's instance
+	// reaching the end of its execution duration (the "complete" operation of
+	// research.md section 11.5), rather than an explicit scenario-defined deletion or
+	// a preemption (the "delete" operation). It is always false for non-delete events.
+	IsCompletion() bool
+	SetCompletion(bool)
 }
 
 func NewEvent(
@@ -63,6 +69,7 @@ type event struct {
 	eventType          definition.EventType
 	unstructuredObject *unstructured.Unstructured
 	virtualTimestamp   time.Time
+	isCompletion       bool
 }
 
 func (e *event) EventID() int {
@@ -87,4 +94,12 @@ func (e *event) VirtualTimestamp() time.Time {
 
 func (e *event) SetVirtualTimestamp(timestamp time.Time) {
 	e.virtualTimestamp = timestamp
+}
+
+func (e *event) IsCompletion() bool {
+	return e.isCompletion
+}
+
+func (e *event) SetCompletion(isCompletion bool) {
+	e.isCompletion = isCompletion
 }

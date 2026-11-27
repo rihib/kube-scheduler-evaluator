@@ -2,6 +2,7 @@ package scenario
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -38,6 +39,7 @@ func NewManager(
 		resourceManager:     resourceManager,
 		schedulerRegistry:   s.SchedulerRegistry(),
 		schedulerOptions:    s.SchedulerOptions(),
+		runIdentity:         s.RunIdentity(),
 	}
 }
 
@@ -52,15 +54,24 @@ type manager struct {
 	nextRelativeTime    time.Duration
 	schedulerRegistry   runtime.Registry
 	schedulerOptions    []scheduler.Option
+	runIdentity         definition.RunIdentity
 }
 
 type nextEventDefinitionFn func(context.Context) <-chan definition.Event
 
-func (m *manager) Run(ctx context.Context) error {
+// Run runs one iteration of the scenario. The returned error joins the scenario's own
+// error with the error of stopping the cluster, which closes this run's transition
+// record: a run whose record is incomplete must not be reported as a success
+// (cluster.StopCluster), and neither failure may hide the other.
+func (m *manager) Run(ctx context.Context) (err error) {
 	slog.InfoContext(ctx, "start new scenario")
 
+	// Stop the informers and the scheduler of this run, so that they do not record the following runs.
+	defer func() {
+		err = errors.Join(err, cluster.StopCluster(ctx, m.resourceManager))
+	}()
 	if !m.consts.IsExternalMode() {
-		if err := cluster.InitCluster(ctx, m.resourceManager, m.schedulerRegistry, m.schedulerOptions); err != nil {
+		if err := cluster.InitCluster(ctx, m.resourceManager, m.schedulerRegistry, m.schedulerOptions, m.runIdentity); err != nil {
 			return err
 		}
 	} else {
@@ -181,6 +192,10 @@ func (m *manager) nextDeleteEventsBefore(ctx context.Context, e event.Event) (ev
 	if err != nil {
 		return nil, err
 	}
+	// This delete event comes from the Pod's execution duration elapsing, not from a
+	// scenario-defined deletion or a preemption, so it records as "complete" rather
+	// than "delete" (research.md section 11.5, units/U01.md).
+	deleteEvent.SetCompletion(true)
 	return deleteEvent, nil
 }
 

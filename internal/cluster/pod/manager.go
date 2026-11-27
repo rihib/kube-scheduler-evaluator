@@ -39,11 +39,34 @@ func NewPodManager(
 	c consts.Consts,
 	informerFactory informers.SharedInformerFactory,
 	metricManager metric.Manager,
+	recorder *Recorder,
 ) (PodManager, error) {
 	podInformer := informerFactory.Core().V1().Pods().Informer()
 	podActivityCh := make(chan struct{}, 1)
-	scheduledAtMap := newScheduledAtMapper()
-	podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	if c.IsExternalMode() {
+		scheduledAtMap := newScheduledAtMapper()
+		if err := addExternalModeEventHandler(ctx, c, podInformer, metricManager, scheduledAtMap, podActivityCh); err != nil {
+			return nil, err
+		}
+		return newPodManager(c, metricManager, podInformer, podActivityCh, scheduledAtMap, nil)
+	}
+	// In internal mode, the reactors of the fake API server record the transitions of Pods through recorder.
+	if recorder == nil {
+		return nil, fmt.Errorf("pod.NewPodManager: recorder is required in internal mode")
+	}
+	recorder.setRunContext(ctx)
+	return newPodManager(c, metricManager, podInformer, podActivityCh, recorder.scheduledAtMap, recorder)
+}
+
+func addExternalModeEventHandler(
+	ctx context.Context,
+	c consts.Consts,
+	podInformer cache.SharedIndexInformer,
+	metricManager metric.Manager,
+	scheduledAtMap *scheduledAtMapper,
+	podActivityCh chan struct{},
+) error {
+	_, err := podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
 			pod, _ := obj.(*corev1.Pod)
 			handleVirtualCreatedAt(ctx, pod, c, metricManager)
@@ -91,6 +114,20 @@ func NewPodManager(
 			}
 		},
 	})
+	if err != nil {
+		return fmt.Errorf("pod.NewPodManager: %w", err)
+	}
+	return nil
+}
+
+func newPodManager(
+	c consts.Consts,
+	metricManager metric.Manager,
+	podInformer cache.SharedIndexInformer,
+	podActivityCh chan struct{},
+	scheduledAtMap *scheduledAtMapper,
+	recorder *Recorder,
+) (PodManager, error) {
 	if err := podInformer.AddIndexers(map[string]cache.IndexFunc{
 		indexNodeName: func(obj any) ([]string, error) {
 			pod, ok := obj.(*corev1.Pod)
@@ -117,6 +154,7 @@ func NewPodManager(
 		podIndexer:           podIndexer,
 		podActivityCh:        podActivityCh,
 		scheduledAtMap:       scheduledAtMap,
+		recorder:             recorder,
 		podsWithDeletedOwner: sets.New[string](),
 	}, nil
 }
@@ -127,6 +165,7 @@ type podManager struct {
 	podIndexer           cache.Indexer
 	podActivityCh        chan struct{}
 	scheduledAtMap       *scheduledAtMapper
+	recorder             *Recorder // nil in external mode
 	podsWithDeletedOwner sets.Set[string]
 }
 
@@ -211,9 +250,12 @@ func (pm *podManager) DeletionCandidatesOf(
 		if deletionTime.After(asOfTime) {
 			continue
 		}
+		creationOrder, hasCreationOrder := pm.creationOrderOf(pod)
 		candidates = append(candidates, &DeletionCandidate{
-			pod:          pod,
-			deletionTime: deletionTime,
+			pod:              pod,
+			deletionTime:     deletionTime,
+			creationOrder:    creationOrder,
+			hasCreationOrder: hasCreationOrder,
 		})
 		slog.DebugContext(
 			ctx, "found deletion candidate",
@@ -231,14 +273,41 @@ func (pm *podManager) DeletionCandidatesOf(
 		"asOfTime", asOfTime,
 	)
 	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].deletionTime.Before(candidates[j].deletionTime)
+		return candidates[i].deletesBefore(candidates[j])
 	})
 	return candidates, errLine
 }
 
 type DeletionCandidate struct {
-	pod          *corev1.Pod
-	deletionTime time.Time
+	pod              *corev1.Pod
+	deletionTime     time.Time
+	creationOrder    uint64
+	hasCreationOrder bool
+}
+
+// deletesBefore orders the candidates by deletion time.
+// Pods that finish at the same virtual time are deleted in the order they were created,
+// so that the order does not depend on the real time or on the order of the informer cache.
+func (p *DeletionCandidate) deletesBefore(q *DeletionCandidate) bool {
+	if !p.deletionTime.Equal(q.deletionTime) {
+		return p.deletionTime.Before(q.deletionTime)
+	}
+	if p.hasCreationOrder && q.hasCreationOrder && p.creationOrder != q.creationOrder {
+		return p.creationOrder < q.creationOrder
+	}
+	if !p.pod.CreationTimestamp.Equal(&q.pod.CreationTimestamp) {
+		return p.pod.CreationTimestamp.Before(&q.pod.CreationTimestamp)
+	}
+	return util.ResourceKeyOf(p.pod).String() < util.ResourceKeyOf(q.pod).String()
+}
+
+// creationOrderOf returns the order in which the Pod was created.
+// It is known only in internal mode, where every Pod is created through the fake API server.
+func (pm *podManager) creationOrderOf(pod *corev1.Pod) (uint64, bool) {
+	if pm.recorder == nil {
+		return 0, false
+	}
+	return pm.recorder.creationOrderOf(pod)
 }
 
 func (p *DeletionCandidate) Pod() *corev1.Pod {
@@ -280,22 +349,9 @@ func (pm *podManager) podExecutionDurationOf(pod *corev1.Pod) (time.Duration, er
 }
 
 func (pm *podManager) scheduledAtOf(pod *corev1.Pod) (time.Time, error) {
+	// In internal mode, the binding reactor sets scheduledAt before the fake API server stores the bound Pod,
+	// so scheduledAt is always set for a Pod that the informer cache shows as Running.
 	scheduledAt, ok := pm.scheduledAtMap.get(util.ResourceKeyOf(pod))
-	// TODO:
-	// Currently, scheduledAt is set by event handlers, but there is a lag between when a Pod is actually scheduled and when the event handler is called.
-	// In NonExternalMode, in-memory processing happens quickly, so scheduledAt may not be set yet when we try to retrieve it here.
-	// Therefore, we currently perform retries with Sleep, but in the future we want to eliminate this retry logic by setting scheduledAt with prependReactor.
-	if !ok && !pm.consts.IsExternalMode() {
-		backoff := time.Millisecond * 10
-		for range 5 {
-			time.Sleep(backoff)
-			scheduledAt, ok = pm.scheduledAtMap.get(util.ResourceKeyOf(pod))
-			if ok {
-				break
-			}
-			backoff *= 2
-		}
-	}
 	if !ok {
 		return time.Time{}, fmt.Errorf("pod.getPodScheduledAt: pod %q has no scheduledAt in scheduledAtMap", util.ResourceKeyOf(pod))
 	}

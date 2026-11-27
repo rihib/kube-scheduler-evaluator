@@ -32,7 +32,7 @@ kube-scheduler-evaluator emulates controllers internally, enabling evaluations t
 Import kube-scheduler-evaluator as shown below, implement a scenario generator function, and create a program to execute evaluations.
 The scenario generator function receives an event channel and sends events to the channel to create or delete nodes and jobs (actually ReplicaSets).
 Therefore, users can execute arbitrary scenarios by implementing the scenario generator function.
-Use the `WithScenario` function to pass the scenario name, number of executions, scenario generator function, scheduler registry, and scheduler options to the kube-scheduler-evaluator.
+Use the `WithScenario` function to pass the scenario name, number of executions, scenario generator function, scheduler registry, the scenario's run identity (for the transition record, see below), and scheduler options to the kube-scheduler-evaluator.
 
 For implementation details, refer to the [kube-scheduler-evaluator-reference](https://github.com/pfnet/kube-scheduler-evaluator-reference).
 
@@ -75,13 +75,20 @@ func main() {
       etcdURL,
       false, // disable externalMode
       slogLevel,
+      // In internal execution mode, this is where the evaluator writes the transition
+      // record (one JSONL file per scenario run). Omit it in external mode, where this
+      // record is out of scope.
+      evaluator.WithRecordOutputDir(recordOutputDir),
     ),
     evaluator.WithMetricStores(
       definition.NewMetricStore(definition.VictoriaMetrics, victoriaMetricsURL),
     ),
-    // scenarioName, iteration, scenarioGenerator, schedulerRegistry, schedulerOptions
-    evaluator.WithScenario(scenarioName1, 3, scenarioGenerator1, nil),  // default-scheduler
-    evaluator.WithScenario(scenarioName2, 1, scenarioGenerator2, registry, scheduler.WithProfiles(profiles...)),  // your-custom-scheduler
+    // scenarioName, iteration, scenarioGenerator, schedulerRegistry, runIdentity, schedulerOptions
+    // runIdentity identifies each of this scenario's runs in the transition record:
+    // the evaluator does not know how the input was produced or how the scheduler
+    // profile was configured, so the caller supplies it.
+    evaluator.WithScenario(scenarioName1, 3, scenarioGenerator1, nil, runIdentity1),  // default-scheduler
+    evaluator.WithScenario(scenarioName2, 1, scenarioGenerator2, registry, runIdentity2, scheduler.WithProfiles(profiles...)),  // your-custom-scheduler
   )
   if err != nil {
     panic(err)
@@ -189,6 +196,34 @@ func scenarioGenerator1(ch chan<- Event) {
   }
 }
 ```
+
+## Transition record
+
+In internal execution mode, the evaluator writes one JSONL file per scenario
+run to the folder given by `evaluator.WithRecordOutputDir`. The first line
+identifies the run: the input, the evaluator's and the caller's commits, the
+machine, the scheduler profile and the iteration. Every line after it is one
+transition of one mutable state, carrying the virtual time of the event that
+caused it and a sequence number that orders transitions sharing a virtual time.
+
+Each transition names the operation that caused it. The operation names are
+English identifiers; the model they come from (research.md section 11.5) names
+them in Japanese:
+
+| operation | research.md | Cause |
+| --- | --- | --- |
+| `create_task` | タスクを作る | A ReplicaSet gets its first Pod |
+| `recreate` | 再作成する | A resync recreates a deleted Pod |
+| `assign_node` | 実行先ノードを割り当てる | The Pod is bound to a node |
+| `start` | 実行を開始する | Binding, at the `assign_node` time |
+| `complete` | 完了する | The execution duration has elapsed |
+| `delete` | 削除する | The scenario deletes it, or preemption |
+| `release` | リソースを解放する | A `complete` or a `delete` frees them |
+| `register_node` | ノードを登録する | The scenario creates a node |
+| `deregister_node` | ノードを削除する | The scenario deletes a node |
+
+Operations the evaluator cannot cause are out of scope: they are recorded when the
+evaluator gains the ability to cause them.
 
 ## `externalMode`
 
