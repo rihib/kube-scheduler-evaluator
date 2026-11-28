@@ -363,6 +363,7 @@ func (m *manager) Bind(taskID, instanceID, nodeID string, allocated map[string]s
 
 	// allocated_resource is a mutable state of the node, keyed by instance_id
 	// (research.md section 10.5), so component_id must be the node, not the instance.
+	allocated = m.dropUnregisteredCapacity(nodeID, allocated)
 	m.allocations[instanceID] = &allocationState{nodeID: nodeID, resources: allocated}
 	m.write(OpAssignNode, nodeID, taskID, StateAllocatedResource, instanceID, nil, allocated, nil)
 
@@ -372,6 +373,28 @@ func (m *manager) Bind(taskID, instanceID, nodeID string, allocated map[string]s
 	}
 	inst.status = "running"
 	m.write(OpStart, instanceID, taskID, StateInstanceStatus, "", beforeStatus, "running", nil)
+}
+
+// dropUnregisteredCapacity drops any key allocated names that nodeID's
+// resource_capacity (register_node) does not have, logging each one, so that a bad
+// allocation (round1 correctness nits: e.g. a GPU index beyond the node's registered
+// GPU count) cannot make the aggregation count usage of capacity the node was never
+// registered as having. The caller must hold m.mu.
+func (m *manager) dropUnregisteredCapacity(nodeID string, allocated map[string]string) map[string]string {
+	node, ok := m.nodes[nodeID]
+	if !ok || node.capacity == nil || len(allocated) == 0 {
+		return allocated
+	}
+	filtered := make(map[string]string, len(allocated))
+	for k, v := range allocated {
+		if _, ok := node.capacity[k]; !ok {
+			slog.Error("record.Bind: dropping an allocated_resource key the node's resource_capacity does not have",
+				"node", nodeID, "key", k, "value", v)
+			continue
+		}
+		filtered[k] = v
+	}
+	return filtered
 }
 
 func (m *manager) Complete(taskID, instanceID string) {

@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -171,10 +172,14 @@ func InitCluster(
 // It must be called at the end of each run, so that the informers and the pod manager of the run
 // do not keep recording the Pods of the following runs.
 //
-// It returns the error of closing the run's transition record. A run whose record lost
-// lines is not a record of the run that happened, and nothing downstream can tell the
-// difference (U04 aggregates it as if it were complete), so the caller must fail the
-// run instead of reporting success.
+// It returns the error of closing the run's transition record, and the first error the
+// Pod recorder held while a Pod was bound (round1 Must 3: pod.Recorder.PodScheduled
+// holds this instead of returning it to the bind reactor, which would otherwise make
+// kube-scheduler retry the bind indefinitely instead of failing). A run whose record
+// lost lines, or hit a Pod it could not record the allocation of, is not a record of
+// the run that happened, and nothing downstream can tell the difference (U04
+// aggregates it as if it were complete), so the caller must fail the run instead of
+// reporting success.
 func StopCluster(ctx context.Context, mng Manager) error {
 	var m *manager
 	switch v := mng.(type) {
@@ -186,10 +191,19 @@ func StopCluster(ctx context.Context, mng Manager) error {
 		return nil
 	}
 	m.stopRun()
+	var errs []error
+	if m.podRecorder != nil {
+		if err := m.podRecorder.Err(); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	if m.recordManager != nil {
 		if err := m.recordManager.EndRun(); err != nil {
-			return fmt.Errorf("cluster.StopCluster: failed to close the transition record: %w", err)
+			errs = append(errs, fmt.Errorf("failed to close the transition record: %w", err))
 		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("cluster.StopCluster: %w", errors.Join(errs...))
 	}
 	slog.DebugContext(ctx, "cluster stopped")
 	return nil

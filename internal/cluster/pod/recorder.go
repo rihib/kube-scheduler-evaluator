@@ -40,6 +40,7 @@ type Recorder struct {
 	nextOrder        uint64
 	tasksCreated     map[string]struct{} // taskID (owner UID) of tasks that already have a recorded instance
 	completionMarked map[string]struct{} // pod keys whose next deletion is a "complete", not a "delete"
+	bindErr          error               // the first error PodScheduled held computing a bound Pod's allocation, if any
 }
 
 func NewRecorder(c consts.Consts, metricManager metric.Manager, recordManager record.Manager) *Recorder {
@@ -176,12 +177,29 @@ func resourceMapOf(list corev1.ResourceList) map[string]string {
 }
 
 // PodScheduled is called after the fake API server has bound a Pod to a node.
-func (r *Recorder) PodScheduled(pod *corev1.Pod) error {
+//
+// If the Pod's GPU allocation annotations cannot be read, PodScheduled does not return
+// the error to its caller (the binding reactor): returning it there would make
+// kube-scheduler treat the bind as a retryable failure and keep retrying it instead of
+// surfacing anything (round1 Must 3), so the first such error is held and logged
+// instead, for Err to report once the run ends — the same "hold the first failure,
+// surface it at the end" shape record.Manager uses for a write failure (writeErr,
+// internal/record/record.go). The Pod is still recorded as bound with no allocation of
+// its own, which is fine because Err failing the run at StopCluster makes the whole
+// record untrusted anyway.
+func (r *Recorder) PodScheduled(pod *corev1.Pod) {
 	allocated, err := allocatedResourceOf(pod)
-	if err != nil {
-		return fmt.Errorf("pod.Recorder.PodScheduled: %w", err)
-	}
 	ctx := r.logContext()
+	if err != nil {
+		wrapped := fmt.Errorf("pod.Recorder.PodScheduled: %w", err)
+		r.mu.Lock()
+		if r.bindErr == nil {
+			r.bindErr = wrapped
+		}
+		r.mu.Unlock()
+		slog.ErrorContext(ctx, "pod.Recorder.PodScheduled: failed to compute the Pod's allocated resource", "pod", util.ResourceKeyOf(pod), "error", err)
+		allocated = nil
+	}
 	virtualScheduledAt := clock.VirtualTime()
 	if exist := r.scheduledAtMap.set(util.ResourceKeyOf(pod), virtualScheduledAt); exist {
 		slog.WarnContext(ctx, "pod already has virtualScheduledAt in scheduledAtMap", "pod", util.ResourceKeyOf(pod))
@@ -195,7 +213,16 @@ func (r *Recorder) PodScheduled(pod *corev1.Pod) error {
 			r.recordManager.Bind(string(ownerRef.UID), string(pod.UID), pod.Spec.NodeName, allocated)
 		}
 	}
-	return nil
+}
+
+// Err returns the first error PodScheduled held while computing a bound Pod's
+// allocation, if any. cluster.StopCluster checks it once a run ends, so a run that hit
+// an annotation it could not parse fails instead of reporting success with an
+// incomplete record.
+func (r *Recorder) Err() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.bindErr
 }
 
 // allocatedResourceOf returns the resources a bound Pod holds on its node
