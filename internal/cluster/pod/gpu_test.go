@@ -94,6 +94,16 @@ func TestGPUAllocatedResourceOf(t *testing.T) {
 			want: map[string]string{"gpu-0": "1000", "gpu-1": "1000"},
 		},
 		{
+			name:        "MilliAnnotationKey is 0: a GPU Pod asking for no share of it",
+			annotations: map[string]string{IndexAnnotationKey: "0", MilliAnnotationKey: "0"},
+			want:        map[string]string{"gpu-0": "0"},
+		},
+		{
+			name:        "MilliAnnotationKey carries a leading plus: recorded as the plain number",
+			annotations: map[string]string{IndexAnnotationKey: "0", MilliAnnotationKey: "+500"},
+			want:        map[string]string{"gpu-0": "500"},
+		},
+		{
 			name:        "MilliAnnotationKey is set but IndexAnnotationKey is missing",
 			annotations: map[string]string{MilliAnnotationKey: "500"},
 			wantErr:     true,
