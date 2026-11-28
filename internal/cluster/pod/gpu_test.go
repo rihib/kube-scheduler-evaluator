@@ -132,6 +132,13 @@ func TestGPUAllocatedResourceOf(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "the same GPU number appears twice in IndexAnnotationKey",
+			annotations: map[string]string{
+				IndexAnnotationKey: "0-0", MilliAnnotationKey: "1000", CountAnnotationKey: "2",
+			},
+			wantErr: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
