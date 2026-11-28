@@ -46,17 +46,17 @@ func parseNonNegativeCount(key, raw string) (int, error) {
 	return n, nil
 }
 
-// NodeGPUCapacityOf reads a Node's annotations, even though it otherwise lives beside
-// the Pod-side helpers in this file: it is exported from package pod, not from
-// package cluster where its only caller (capacityOf) lives, so that it can share
-// CountAnnotationKey, gpuResourceKey and gpuCapacityMilli with gpuAllocatedResourceOf
-// below without exporting those details to cluster too, and without cluster and pod
-// importing each other's GPU constants back and forth.
-//
 // NodeGPUCapacityOf returns the per-GPU resource_capacity entries (units/U03.md) for
 // a Node whose CountAnnotationKey annotation names its number of GPUs, each holding
 // gpuCapacityMilli. It returns nil, nil if the Node carries no CountAnnotationKey
 // annotation (not a GPU node).
+//
+// It reads a Node's annotations even though it otherwise lives beside the Pod-side
+// helpers in this file: it is exported from package pod, not from package cluster where
+// its only caller (capacityOf) lives, so that it can share CountAnnotationKey,
+// gpuResourceKey and gpuCapacityMilli with gpuAllocatedResourceOf below without
+// exporting those details to cluster too, and without cluster and pod importing each
+// other's GPU constants back and forth.
 func NodeGPUCapacityOf(annotations map[string]string) (map[string]string, error) {
 	raw, ok := annotations[CountAnnotationKey]
 	if !ok {

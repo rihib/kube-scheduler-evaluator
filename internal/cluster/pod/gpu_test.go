@@ -2,15 +2,47 @@ package pod
 
 import "testing"
 
+// annotationMapCase is one case for a function that turns a Pod's or Node's
+// annotations into the record's per-GPU map (NodeGPUCapacityOf,
+// gpuAllocatedResourceOf).
+type annotationMapCase struct {
+	name        string
+	annotations map[string]string
+	want        map[string]string
+	wantErr     bool
+}
+
+// runAnnotationMapCases runs each case against fn, naming it fnName in failures.
+func runAnnotationMapCases(t *testing.T, fnName string, fn func(map[string]string) (map[string]string, error), tests []annotationMapCase) {
+	t.Helper()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := fn(tt.annotations)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("%s(%v) = %v, <nil>, want an error", fnName, tt.annotations, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("%s(%v) returned an unexpected error: %v", fnName, tt.annotations, err)
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("%s(%v) = %v, want %v", fnName, tt.annotations, got, tt.want)
+			}
+			for k, v := range tt.want {
+				if got[k] != v {
+					t.Errorf("%s(%v)[%q] = %q, want %q", fnName, tt.annotations, k, got[k], v)
+				}
+			}
+		})
+	}
+}
+
 // TestNodeGPUCapacityOf covers NodeGPUCapacityOf's error branches and its boundary
 // cases: an explicit gpu-count of "0", and no CountAnnotationKey annotation at all.
 func TestNodeGPUCapacityOf(t *testing.T) {
-	tests := []struct {
-		name        string
-		annotations map[string]string
-		want        map[string]string
-		wantErr     bool
-	}{
+	tests := []annotationMapCase{
 		{
 			name:        "no CountAnnotationKey annotation at all: not a GPU node",
 			annotations: map[string]string{},
@@ -37,40 +69,14 @@ func TestNodeGPUCapacityOf(t *testing.T) {
 			wantErr:     true,
 		},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := NodeGPUCapacityOf(tt.annotations)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("NodeGPUCapacityOf(%v) = %v, <nil>, want an error", tt.annotations, got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("NodeGPUCapacityOf(%v) returned an unexpected error: %v", tt.annotations, err)
-			}
-			if len(got) != len(tt.want) {
-				t.Fatalf("NodeGPUCapacityOf(%v) = %v, want %v", tt.annotations, got, tt.want)
-			}
-			for k, v := range tt.want {
-				if got[k] != v {
-					t.Errorf("NodeGPUCapacityOf(%v)[%q] = %q, want %q", tt.annotations, k, got[k], v)
-				}
-			}
-		})
-	}
+	runAnnotationMapCases(t, "NodeGPUCapacityOf", NodeGPUCapacityOf, tests)
 }
 
 // TestGPUAllocatedResourceOf covers gpuAllocatedResourceOf's error branches (a GPU
 // request with no index, a malformed milli share, a malformed or inconsistent index)
 // and its boundary cases (an explicit gpu-index of "" and an explicit gpu-count of "0").
 func TestGPUAllocatedResourceOf(t *testing.T) {
-	tests := []struct {
-		name        string
-		annotations map[string]string
-		want        map[string]string
-		wantErr     bool
-	}{
+	tests := []annotationMapCase{
 		{
 			name:        "no GPU annotation at all: not a GPU Pod",
 			annotations: map[string]string{},
@@ -148,26 +154,5 @@ func TestGPUAllocatedResourceOf(t *testing.T) {
 			wantErr: true,
 		},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := gpuAllocatedResourceOf(tt.annotations)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("gpuAllocatedResourceOf(%v) = %v, <nil>, want an error", tt.annotations, got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("gpuAllocatedResourceOf(%v) returned an unexpected error: %v", tt.annotations, err)
-			}
-			if len(got) != len(tt.want) {
-				t.Fatalf("gpuAllocatedResourceOf(%v) = %v, want %v", tt.annotations, got, tt.want)
-			}
-			for k, v := range tt.want {
-				if got[k] != v {
-					t.Errorf("gpuAllocatedResourceOf(%v)[%q] = %q, want %q", tt.annotations, k, got[k], v)
-				}
-			}
-		})
-	}
+	runAnnotationMapCases(t, "gpuAllocatedResourceOf", gpuAllocatedResourceOf, tests)
 }
