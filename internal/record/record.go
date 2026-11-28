@@ -138,7 +138,9 @@ type HardwareInfoProvider func() (string, error)
 type Manager interface {
 	// BeginRun opens the record file for one run and writes its header line.
 	BeginRun(ctx context.Context, info RunInfo) error
-	// EndRun closes the current run's record file.
+	// EndRun closes the current run's record file, and fails if the record it wrote is
+	// incomplete (a transition that never reached the file, or an allocation the record
+	// could not represent), so that an understated record is not taken for a complete one.
 	EndRun() error
 
 	RegisterNode(nodeID string, capacity, attribute map[string]string)
@@ -189,6 +191,7 @@ type manager struct {
 	mu          sync.Mutex
 	writer      Writer
 	writeErr    error // the first error from writer.WriteLine during the current run, if any
+	dropErr     error // the first allocated_resource key dropped during the current run, if any
 	seq         uint64
 	nodes       map[string]*nodeState
 	instances   map[string]*instanceState
@@ -248,6 +251,7 @@ func (m *manager) BeginRun(ctx context.Context, info RunInfo) error {
 
 	m.writer = w
 	m.writeErr = nil
+	m.dropErr = nil
 	m.seq = 0
 	m.nodes = make(map[string]*nodeState)
 	m.instances = make(map[string]*instanceState)
@@ -255,10 +259,11 @@ func (m *manager) BeginRun(ctx context.Context, info RunInfo) error {
 	return nil
 }
 
-// EndRun closes the current run's writer and reports whether every line reached it.
-// A write failure (e.g. a full disk) does not stop the run early, because the
-// recorded operations also drive the fake API server's state; EndRun is where that
-// failure finally surfaces, instead of being dropped, so a caller does not mistake an
+// EndRun closes the current run's writer and reports whether the record it wrote is
+// complete: whether every line reached the writer, and whether every allocation was
+// recorded as given (dropUnregisteredCapacity). Neither failure stops the run early,
+// because the recorded operations also drive the fake API server's state; EndRun is
+// where they finally surface, instead of being dropped, so a caller does not mistake an
 // incomplete record for a complete one.
 func (m *manager) EndRun() error {
 	m.mu.Lock()
@@ -268,10 +273,15 @@ func (m *manager) EndRun() error {
 	}
 	closeErr := m.writer.Close()
 	writeErr := m.writeErr
+	dropErr := m.dropErr
 	m.writer = nil
 	m.writeErr = nil
+	m.dropErr = nil
 	if writeErr != nil {
 		return fmt.Errorf("record.EndRun: failed to write one or more transitions: %w", writeErr)
+	}
+	if dropErr != nil {
+		return fmt.Errorf("record.EndRun: the record is incomplete: %w", dropErr)
 	}
 	if closeErr != nil {
 		return fmt.Errorf("record.EndRun: failed to close writer: %w", closeErr)
@@ -363,6 +373,7 @@ func (m *manager) Bind(taskID, instanceID, nodeID string, allocated map[string]s
 
 	// allocated_resource is a mutable state of the node, keyed by instance_id
 	// (research.md section 10.5), so component_id must be the node, not the instance.
+	allocated = m.dropUnregisteredCapacity(nodeID, instanceID, allocated)
 	m.allocations[instanceID] = &allocationState{nodeID: nodeID, resources: allocated}
 	m.write(OpAssignNode, nodeID, taskID, StateAllocatedResource, instanceID, nil, allocated, nil)
 
@@ -372,6 +383,36 @@ func (m *manager) Bind(taskID, instanceID, nodeID string, allocated map[string]s
 	}
 	inst.status = "running"
 	m.write(OpStart, instanceID, taskID, StateInstanceStatus, "", beforeStatus, "running", nil)
+}
+
+// dropUnregisteredCapacity drops any key allocated names that nodeID's
+// resource_capacity (register_node) does not have (e.g. a GPU index beyond the node's
+// registered GPU count), so that the aggregation cannot count usage of capacity the
+// node was never registered as having. Each dropped key is logged, and the first one is
+// held in dropErr for EndRun to report: a record missing an allocation the instance
+// really held is an incomplete record, so the run must fail rather than hand the
+// aggregation an understated allocation as if it were complete. The caller must hold
+// m.mu.
+func (m *manager) dropUnregisteredCapacity(nodeID, instanceID string, allocated map[string]string) map[string]string {
+	node, ok := m.nodes[nodeID]
+	if !ok || node.capacity == nil || len(allocated) == 0 {
+		return allocated
+	}
+	filtered := make(map[string]string, len(allocated))
+	for k, v := range allocated {
+		if _, ok := node.capacity[k]; !ok {
+			slog.Error("record.Bind: dropping an allocated_resource key the node's resource_capacity does not have",
+				"node", nodeID, "instance", instanceID, "key", k, "value", v)
+			if m.dropErr == nil {
+				// Keep only the first drop, the same way writeErr does: the run already
+				// fails on one, and the log above carries every one of them.
+				m.dropErr = fmt.Errorf("record: dropped allocated_resource %q=%q of instance %q because node %q has no such resource_capacity entry", k, v, instanceID, nodeID)
+			}
+			continue
+		}
+		filtered[k] = v
+	}
+	return filtered
 }
 
 func (m *manager) Complete(taskID, instanceID string) {

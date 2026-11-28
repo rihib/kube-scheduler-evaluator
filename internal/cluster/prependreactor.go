@@ -157,7 +157,11 @@ func prependNodeRecordReactor(client *fakeclientset.Clientset, recordManager rec
 			return handled, ret, err
 		}
 		if created, ok := ret.(*corev1.Node); ok {
-			recordManager.RegisterNode(created.Name, capacityOf(created), attributeOf(created))
+			capacity, capErr := capacityOf(created)
+			if capErr != nil {
+				return handled, ret, capErr
+			}
+			recordManager.RegisterNode(created.Name, capacity, attributeOf(created))
 		}
 		return handled, ret, err
 	})
@@ -179,14 +183,23 @@ func prependNodeRecordReactor(client *fakeclientset.Clientset, recordManager rec
 	})
 }
 
-// capacityOf returns the node's resource_capacity (research.md section 10.5),
-// mapped from status.allocatable (units/U01.md).
-func capacityOf(node *corev1.Node) map[string]string {
+// capacityOf returns the node's resource_capacity (research.md section 10.5), mapped
+// from status.allocatable (units/U01.md), plus one entry per GPU
+// (pod.NodeGPUCapacityOf, units/U03.md) if the Node carries the GPU annotation
+// (units/U03.md).
+func capacityOf(node *corev1.Node) (map[string]string, error) {
 	capacity := make(map[string]string, len(node.Status.Allocatable))
 	for name, quantity := range node.Status.Allocatable {
 		capacity[string(name)] = quantity.String()
 	}
-	return capacity
+	gpuCapacity, err := pod.NodeGPUCapacityOf(node.GetAnnotations())
+	if err != nil {
+		return nil, fmt.Errorf("cluster.capacityOf: %w", err)
+	}
+	for k, v := range gpuCapacity {
+		capacity[k] = v
+	}
+	return capacity, nil
 }
 
 // attributeOf returns the node's node_attribute (research.md section 10.5),
