@@ -163,9 +163,9 @@ func testGPUNode(cpu, mem string, gpuCount int) *corev1.Node {
 }
 
 // testGPUReplicaSet is testReplicaSet with the GPU annotations (decisions.md) that a
-// scheduler (the kube-scheduler plugin, or the new entry point units/U03.md expects to
-// share the same recording path) sets on a Pod it has already placed on the GPUs named
-// by index (e.g. "0" or "0-1"), each holding the share milli names.
+// scheduler (the kube-scheduler plugin, or the new entry point that units/U03.md
+// expects to share the same recording path) sets on a Pod it has already placed on the
+// GPUs named by index (e.g. "0" or "0-1"), each holding the share milli names.
 func testGPUReplicaSet(namePrefix, podCPU string, priority int32, executionDuration time.Duration, milli, index string) *appsv1.ReplicaSet {
 	rs := testReplicaSet(namePrefix, podCPU, priority, executionDuration)
 	rs.Spec.Template.Annotations[pod.MilliAnnotationKey] = milli
@@ -685,7 +685,6 @@ func requestAndAllocatedCPUOf(t *testing.T, lines []map[string]any) (request, al
 	if len(createRecords) == 0 {
 		t.Fatalf("no create_task record found")
 	}
-	instanceID, _ := createRecords[0]["component_id"].(string)
 	for _, r := range createRecords {
 		imm, ok := r["task_immutable"].(map[string]any)
 		if !ok {
@@ -697,16 +696,7 @@ func requestAndAllocatedCPUOf(t *testing.T, lines []map[string]any) (request, al
 		}
 		request, _ = req["cpu"].(string)
 	}
-	for _, r := range findTransitionsByStateKey(lines, "assign_node", instanceID) {
-		if r["state"] != "allocated_resource" {
-			continue
-		}
-		after, ok := r["after"].(map[string]any)
-		if !ok {
-			t.Fatalf("assign_node allocated_resource after is not an object: %v", r["after"])
-		}
-		allocated, _ = after["cpu"].(string)
-	}
+	allocated, _ = assignNodeAllocatedResourceAfterOf(t, lines)["cpu"].(string)
 	if request == "" || allocated == "" {
 		t.Fatalf("no resource_request (%q) or allocated_resource (%q) recorded: %v", request, allocated, lines)
 	}
@@ -874,6 +864,51 @@ func TestRun_RecordsAllocatedResourceAcrossSeveralGPUs(t *testing.T) {
 	}
 	if after["gpu-1"] != "1000" {
 		t.Errorf("assign_node allocated_resource.gpu-1 = %v, want 1000", after["gpu-1"])
+	}
+}
+
+// TestRun_DropsAllocatedResourceKeysNotInNodeCapacity covers a Pod whose gpu-index
+// names a GPU the Node it is bound to never registered a resource_capacity entry for
+// (here, a Pod naming two GPUs with no gpu-count to cross-check against, bound to a
+// Node with only one GPU registered; round1 correctness nits): assign_node's
+// allocated_resource must not carry that key, so the aggregation cannot count usage of
+// capacity the Node was never recorded as having.
+func TestRun_DropsAllocatedResourceKeysNotInNodeCapacity(t *testing.T) {
+	lines := runEvaluator(t, func(ch chan<- definition.Event) {
+		ch <- definition.NewEvent(definition.EventTypeCreate, testGPUNode("4", "8Gi", 1), 0)
+		ch <- definition.NewEvent(definition.EventTypeCreate, testGPUReplicaSet("gpu-overrun", "1", 0, 10*time.Second, "1000", "0-1"), 0)
+	})
+
+	after := assignNodeAllocatedResourceAfterOf(t, lines)
+	if after["gpu-0"] != "1000" {
+		t.Errorf("assign_node allocated_resource.gpu-0 = %v, want 1000", after["gpu-0"])
+	}
+	if _, ok := after["gpu-1"]; ok {
+		t.Errorf("assign_node allocated_resource = %v, want no gpu-1 entry: the Node only registered gpu-0", after)
+	}
+}
+
+// TestRun_FailsWhenAPodsGPUAllocationCannotBeComputed covers a Pod that asks for a GPU
+// (gpu-milli set) but, for whatever reason, reaches bind time with no gpu-index
+// annotation (units/U03.md: a bug upstream of the recording path, not a Pod this
+// experiment models as using no GPU — round1 Must 1). The run must fail, but quickly:
+// PodScheduled must not return this error to the bind reactor (round1 Must 3), which
+// would make kube-scheduler retry the bind indefinitely instead of failing, and would
+// only surface as a 30-second test timeout instead of a real failure signal.
+func TestRun_FailsWhenAPodsGPUAllocationCannotBeComputed(t *testing.T) {
+	w := &fakeRecordWriter{}
+	start := time.Now()
+	code := runEvaluatorExitCode(t, w, 1, func(ch chan<- definition.Event) {
+		rs := testReplicaSet("gpu-no-index", "1", 0, 10*time.Second)
+		rs.Spec.Template.Annotations[pod.MilliAnnotationKey] = "500"
+		ch <- definition.NewEvent(definition.EventTypeCreate, testGPUNode("4", "8Gi", 1), 0)
+		ch <- definition.NewEvent(definition.EventTypeCreate, rs, 0)
+	})
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Errorf("evaluator.Run took %v, want it to fail quickly instead of waiting out a retry loop or the test's context timeout", elapsed)
+	}
+	if code == 0 {
+		t.Fatalf("evaluator.Run: expected a non-zero exit code when a Pod's GPU allocation cannot be computed, got 0")
 	}
 }
 
