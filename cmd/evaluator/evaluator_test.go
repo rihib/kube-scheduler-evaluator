@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/pfnet/kube-scheduler-evaluator/internal/cluster/pod"
 	"github.com/pfnet/kube-scheduler-evaluator/pkg/definition"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -147,6 +149,27 @@ func testReplicaSet(namePrefix, podCPU string, priority int32, executionDuration
 		},
 	}
 	rs.SetGroupVersionKind(appsv1.SchemeGroupVersion.WithKind("ReplicaSet"))
+	return rs
+}
+
+// testGPUNode is testNode with the GPU annotation decisions.md names for a Node
+// (units/U03.md): CountAnnotationKey, naming how many GPUs it has.
+func testGPUNode(cpu, mem string, gpuCount int) *corev1.Node {
+	node := testNode(cpu, mem)
+	node.Annotations = map[string]string{
+		pod.CountAnnotationKey: strconv.Itoa(gpuCount),
+	}
+	return node
+}
+
+// testGPUReplicaSet is testReplicaSet with the GPU annotations (decisions.md) that a
+// scheduler (the kube-scheduler plugin, or the new entry point units/U03.md expects to
+// share the same recording path) sets on a Pod it has already placed on the GPUs named
+// by index (e.g. "0" or "0-1"), each holding the share milli names.
+func testGPUReplicaSet(namePrefix, podCPU string, priority int32, executionDuration time.Duration, milli, index string) *appsv1.ReplicaSet {
+	rs := testReplicaSet(namePrefix, podCPU, priority, executionDuration)
+	rs.Spec.Template.Annotations[pod.MilliAnnotationKey] = milli
+	rs.Spec.Template.Annotations[pod.IndexAnnotationKey] = index
 	return rs
 }
 
@@ -784,4 +807,95 @@ func TestRun_RecordsThePodsPriorityAndNodeSelector(t *testing.T) {
 	if constraint["zone"] != "a" {
 		t.Errorf("task_immutable.placement_constraint.zone = %v, want a", constraint["zone"])
 	}
+}
+
+// TestRun_RegistersPerGPUNodeCapacity covers a GPU Node (units/U03.md): register_node's
+// resource_capacity must carry one entry per GPU (gpuCapacityMilli each), alongside the
+// Node's ordinary cpu/memory capacity, not just the ordinary capacity on its own.
+func TestRun_RegistersPerGPUNodeCapacity(t *testing.T) {
+	lines := runEvaluator(t, func(ch chan<- definition.Event) {
+		ch <- definition.NewEvent(definition.EventTypeCreate, testGPUNode("4", "8Gi", 2), 0)
+	})
+
+	capacityRecords := findTransitions(lines, "register_node", "")
+	var after map[string]any
+	for _, r := range capacityRecords {
+		if r["state"] == "resource_capacity" {
+			after, _ = r["after"].(map[string]any)
+			break
+		}
+	}
+	if after == nil {
+		t.Fatalf("no register_node resource_capacity record found in %v", capacityRecords)
+	}
+	if after["cpu"] != "4" {
+		t.Errorf("registered node cpu capacity = %v, want 4 (the per-GPU entries must not replace the ordinary capacity)", after["cpu"])
+	}
+	if after["gpu-0"] != "1000" {
+		t.Errorf("registered node gpu-0 capacity = %v, want 1000", after["gpu-0"])
+	}
+	if after["gpu-1"] != "1000" {
+		t.Errorf("registered node gpu-1 capacity = %v, want 1000", after["gpu-1"])
+	}
+}
+
+// TestRun_RecordsPerGPUAllocatedResource covers a Pod placed on a fraction of one GPU
+// (units/U03.md): assign_node's allocated_resource must carry the per-GPU share the
+// Pod's gpu-milli annotation names, keyed by the GPU index its gpu-index annotation
+// names (decisions.md), alongside the Pod's ordinary cpu allocation.
+func TestRun_RecordsPerGPUAllocatedResource(t *testing.T) {
+	lines := runEvaluator(t, func(ch chan<- definition.Event) {
+		ch <- definition.NewEvent(definition.EventTypeCreate, testGPUNode("4", "8Gi", 1), 0)
+		ch <- definition.NewEvent(definition.EventTypeCreate, testGPUReplicaSet("gpu-share", "1", 0, 10*time.Second, "500", "0"), 0)
+	})
+
+	after := assignNodeAllocatedResourceAfterOf(t, lines)
+	if after["cpu"] != "1" {
+		t.Errorf("assign_node allocated_resource.cpu = %v, want 1 (the per-GPU entry must not replace the ordinary allocation)", after["cpu"])
+	}
+	if after["gpu-0"] != "500" {
+		t.Errorf("assign_node allocated_resource.gpu-0 = %v, want 500", after["gpu-0"])
+	}
+}
+
+// TestRun_RecordsAllocatedResourceAcrossSeveralGPUs covers a Pod placed on more than
+// one whole GPU (units/U03.md): the gpu-index annotation names every GPU the Pod holds,
+// "-"-joined (decisions.md), and assign_node's allocated_resource must carry one entry
+// per GPU named, each holding the Pod's gpu-milli share.
+func TestRun_RecordsAllocatedResourceAcrossSeveralGPUs(t *testing.T) {
+	lines := runEvaluator(t, func(ch chan<- definition.Event) {
+		ch <- definition.NewEvent(definition.EventTypeCreate, testGPUNode("4", "8Gi", 2), 0)
+		ch <- definition.NewEvent(definition.EventTypeCreate, testGPUReplicaSet("gpu-whole", "1", 0, 10*time.Second, "1000", "0-1"), 0)
+	})
+
+	after := assignNodeAllocatedResourceAfterOf(t, lines)
+	if after["gpu-0"] != "1000" {
+		t.Errorf("assign_node allocated_resource.gpu-0 = %v, want 1000", after["gpu-0"])
+	}
+	if after["gpu-1"] != "1000" {
+		t.Errorf("assign_node allocated_resource.gpu-1 = %v, want 1000", after["gpu-1"])
+	}
+}
+
+// assignNodeAllocatedResourceAfterOf returns the after value of the one task's
+// assign_node allocated_resource record.
+func assignNodeAllocatedResourceAfterOf(t *testing.T, lines []map[string]any) map[string]any {
+	t.Helper()
+	createRecords := findTransitions(lines, "create_task", "")
+	if len(createRecords) == 0 {
+		t.Fatalf("no create_task record found")
+	}
+	instanceID, _ := createRecords[0]["component_id"].(string)
+	for _, r := range findTransitionsByStateKey(lines, "assign_node", instanceID) {
+		if r["state"] != "allocated_resource" {
+			continue
+		}
+		after, ok := r["after"].(map[string]any)
+		if !ok {
+			t.Fatalf("assign_node allocated_resource after is not an object: %v", r["after"])
+		}
+		return after
+	}
+	t.Fatalf("no assign_node allocated_resource record found for instance %s in %v", instanceID, lines)
+	return nil
 }
