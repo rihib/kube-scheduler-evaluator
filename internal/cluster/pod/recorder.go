@@ -2,6 +2,7 @@ package pod
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -175,7 +176,11 @@ func resourceMapOf(list corev1.ResourceList) map[string]string {
 }
 
 // PodScheduled is called after the fake API server has bound a Pod to a node.
-func (r *Recorder) PodScheduled(pod *corev1.Pod) {
+func (r *Recorder) PodScheduled(pod *corev1.Pod) error {
+	allocated, err := allocatedResourceOf(pod)
+	if err != nil {
+		return fmt.Errorf("pod.Recorder.PodScheduled: %w", err)
+	}
 	ctx := r.logContext()
 	virtualScheduledAt := clock.VirtualTime()
 	if exist := r.scheduledAtMap.set(util.ResourceKeyOf(pod), virtualScheduledAt); exist {
@@ -187,22 +192,39 @@ func (r *Recorder) PodScheduled(pod *corev1.Pod) {
 	)
 	if r.recordManager != nil {
 		if ownerRef := metav1.GetControllerOf(pod); ownerRef != nil {
-			r.recordManager.Bind(string(ownerRef.UID), string(pod.UID), pod.Spec.NodeName, allocatedResourceOf(pod))
+			r.recordManager.Bind(string(ownerRef.UID), string(pod.UID), pod.Spec.NodeName, allocated)
 		}
 	}
+	return nil
 }
 
 // allocatedResourceOf returns the resources a bound Pod holds on its node
 // (research.md section 10.5's allocated_resource, keyed by instance_id). It is the
 // Pod's request as kube-scheduler computes it, so that the record says what the
 // scheduler actually reserved on the node: the sum over the regular containers, or the
-// largest init container if that is bigger, plus the Pod's overhead.
+// largest init container if that is bigger, plus the Pod's overhead. It also includes
+// one entry per GPU (gpuAllocatedResourceOf, units/U03.md) if the Pod carries the GPU
+// allocation annotations (decisions.md), regardless of which entry point placed it.
 //
 // Neither units/U01.md nor decisions.md models an instance's allocation changing after
 // it is assigned a node, and this pilot's scenarios never resize a running Pod, so the
 // request at bind time is the instance's allocation for the whole run.
-func allocatedResourceOf(pod *corev1.Pod) map[string]string {
-	return resourceMapOf(resourcehelper.PodRequests(pod, podResourceOptions))
+func allocatedResourceOf(pod *corev1.Pod) (map[string]string, error) {
+	allocated := resourceMapOf(resourcehelper.PodRequests(pod, podResourceOptions))
+	gpuAllocated, err := gpuAllocatedResourceOf(pod.GetAnnotations())
+	if err != nil {
+		return nil, fmt.Errorf("pod.allocatedResourceOf: %w", err)
+	}
+	if len(gpuAllocated) == 0 {
+		return allocated, nil
+	}
+	if allocated == nil {
+		allocated = make(map[string]string, len(gpuAllocated))
+	}
+	for k, v := range gpuAllocated {
+		allocated[k] = v
+	}
+	return allocated, nil
 }
 
 // PodDeleted is called after the fake API server has deleted a Pod.
