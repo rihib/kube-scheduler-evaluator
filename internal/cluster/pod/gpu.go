@@ -104,9 +104,15 @@ func gpuAllocatedResourceOf(annotations map[string]string) (map[string]string, e
 	if !ok {
 		return nil, fmt.Errorf("pod.gpuAllocatedResourceOf: %s is set but %s is missing", IndexAnnotationKey, MilliAnnotationKey)
 	}
-	if _, err := parseNonNegativeCount(MilliAnnotationKey, milliRaw); err != nil {
+	milli, err := parseNonNegativeCount(MilliAnnotationKey, milliRaw)
+	if err != nil {
 		return nil, fmt.Errorf("pod.gpuAllocatedResourceOf: %w", err)
 	}
+	// Record the parsed number, not the annotation's own spelling: the capacity side
+	// writes gpuCapacityMilli through strconv.Itoa (NodeGPUCapacityOf), so a Pod
+	// annotated "+500" or "0500" would otherwise leave the record comparing shares in
+	// two different spellings of the same quantity.
+	milliValue := strconv.Itoa(milli)
 
 	parts := strings.Split(indexRaw, "-")
 	if hasCount {
@@ -135,7 +141,7 @@ func gpuAllocatedResourceOf(annotations map[string]string) (map[string]string, e
 		if _, dup := allocated[key]; dup {
 			return nil, fmt.Errorf("pod.gpuAllocatedResourceOf: %s %q names GPU %d more than once", IndexAnnotationKey, indexRaw, index)
 		}
-		allocated[key] = milliRaw
+		allocated[key] = milliValue
 	}
 	return allocated, nil
 }
