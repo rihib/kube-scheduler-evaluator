@@ -896,8 +896,8 @@ func TestRun_FailsWhenAnAllocatedResourceKeyIsNotInNodeCapacity(t *testing.T) {
 // TestRun_FailsWhenAPodsGPUAllocationCannotBeComputed covers a Pod that asks for a GPU
 // (gpu-milli set) but, for whatever reason, reaches bind time with no gpu-index
 // annotation (units/U03.md: a bug upstream of the recording path, not a Pod this
-// experiment models as using no GPU — round1 Must 1). The run must fail, but quickly:
-// PodScheduled must not return this error to the bind reactor (round1 Must 3), which
+// experiment models as using no GPU). The run must fail, but quickly:
+// PodScheduled must not return this error to the bind reactor, which
 // would make kube-scheduler retry the bind indefinitely instead of failing, and would
 // only surface as a 30-second test timeout instead of a real failure signal.
 func TestRun_FailsWhenAPodsGPUAllocationCannotBeComputed(t *testing.T) {

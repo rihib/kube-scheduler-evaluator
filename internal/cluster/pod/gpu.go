@@ -83,8 +83,8 @@ func NodeGPUCapacityOf(annotations map[string]string) (map[string]string, error)
 // already carry IndexAnnotationKey by the time this is called (at bind time): the
 // kube-scheduler plugin path and the new entry point both set it before the Pod is
 // recorded as bound (units/U03.md), so this function does not need to know which one
-// did, but a GPU Pod reaching bind with no index yet is a bug upstream (round1 Must 1)
-// rather than a Pod this experiment modeled as "using no GPU" — recording it as such
+// did, but a GPU Pod reaching bind with no index yet is a bug upstream rather than a
+// Pod this experiment modeled as "using no GPU" — recording it as such
 // would let a GPU-bound Pod silently vanish from the aggregation's GPU usage.
 func gpuAllocatedResourceOf(annotations map[string]string) (map[string]string, error) {
 	indexRaw, hasIndex := annotations[IndexAnnotationKey]

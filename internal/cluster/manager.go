@@ -173,7 +173,7 @@ func InitCluster(
 // do not keep recording the Pods of the following runs.
 //
 // It returns the error of closing the run's transition record, and the first error the
-// Pod recorder held while a Pod was bound (round1 Must 3: pod.Recorder.PodScheduled
+// Pod recorder held while a Pod was bound (pod.Recorder.PodScheduled
 // holds this instead of returning it to the bind reactor, which would otherwise make
 // kube-scheduler retry the bind indefinitely instead of failing). A run whose record
 // lost lines, or hit a Pod it could not record the allocation of, is not a record of

@@ -181,7 +181,7 @@ func resourceMapOf(list corev1.ResourceList) map[string]string {
 // If the Pod's GPU allocation annotations cannot be read, PodScheduled does not return
 // the error to its caller (the binding reactor): returning it there would make
 // kube-scheduler treat the bind as a retryable failure and keep retrying it instead of
-// surfacing anything (round1 Must 3), so the first such error is held and logged
+// surfacing anything, so the first such error is held and logged
 // instead, for Err to report once the run ends — the same "hold the first failure,
 // surface it at the end" shape record.Manager uses for a write failure (writeErr,
 // internal/record/record.go). The Pod is still recorded as bound with no allocation of

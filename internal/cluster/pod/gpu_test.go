@@ -2,9 +2,8 @@ package pod
 
 import "testing"
 
-// TestNodeGPUCapacityOf covers NodeGPUCapacityOf's error branches (round1 Must 5: none
-// of these were exercised by any test) and its boundary cases (round1 nits: an explicit
-// gpu-count of "0", and no CountAnnotationKey annotation at all).
+// TestNodeGPUCapacityOf covers NodeGPUCapacityOf's error branches and its boundary
+// cases: an explicit gpu-count of "0", and no CountAnnotationKey annotation at all.
 func TestNodeGPUCapacityOf(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -62,10 +61,9 @@ func TestNodeGPUCapacityOf(t *testing.T) {
 	}
 }
 
-// TestGPUAllocatedResourceOf covers gpuAllocatedResourceOf's error branches (round1
-// Must 5, including the two cases round1 Must 1 and Must 2 added: a GPU request with
-// no index, and an unvalidated milli share) and its boundary cases (round1 nits: an
-// explicit gpu-index of "" and an explicit gpu-count of "0").
+// TestGPUAllocatedResourceOf covers gpuAllocatedResourceOf's error branches (a GPU
+// request with no index, a malformed milli share, a malformed or inconsistent index)
+// and its boundary cases (an explicit gpu-index of "" and an explicit gpu-count of "0").
 func TestGPUAllocatedResourceOf(t *testing.T) {
 	tests := []struct {
 		name        string
