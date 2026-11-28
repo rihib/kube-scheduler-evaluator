@@ -867,19 +867,24 @@ func TestRun_RecordsAllocatedResourceAcrossSeveralGPUs(t *testing.T) {
 	}
 }
 
-// TestRun_DropsAllocatedResourceKeysNotInNodeCapacity covers a Pod whose gpu-index
-// names a GPU the Node it is bound to never registered a resource_capacity entry for
-// (here, a Pod naming two GPUs with no gpu-count to cross-check against, bound to a
-// Node with only one GPU registered; round1 correctness nits): assign_node's
-// allocated_resource must not carry that key, so the aggregation cannot count usage of
-// capacity the Node was never recorded as having.
-func TestRun_DropsAllocatedResourceKeysNotInNodeCapacity(t *testing.T) {
-	lines := runEvaluator(t, func(ch chan<- definition.Event) {
+// TestRun_FailsWhenAnAllocatedResourceKeyIsNotInNodeCapacity covers a Pod whose
+// gpu-index names a GPU the Node it is bound to never registered a resource_capacity
+// entry for (here, a Pod naming two GPUs with no gpu-count to cross-check against,
+// bound to a Node with only one GPU registered): assign_node's allocated_resource must
+// not carry that key, so the aggregation cannot count usage of capacity the Node was
+// never recorded as having, and the run must fail so that the record left behind, which
+// is now missing an allocation the Pod really held, is not taken for a complete one.
+func TestRun_FailsWhenAnAllocatedResourceKeyIsNotInNodeCapacity(t *testing.T) {
+	w := &fakeRecordWriter{}
+	code := runEvaluatorExitCode(t, w, 1, func(ch chan<- definition.Event) {
 		ch <- definition.NewEvent(definition.EventTypeCreate, testGPUNode("4", "8Gi", 1), 0)
 		ch <- definition.NewEvent(definition.EventTypeCreate, testGPUReplicaSet("gpu-overrun", "1", 0, 10*time.Second, "1000", "0-1"), 0)
 	})
+	if code == 0 {
+		t.Errorf("evaluator.Run: expected a non-zero exit code when an allocated_resource key is not in the node's resource_capacity, got 0")
+	}
 
-	after := assignNodeAllocatedResourceAfterOf(t, lines)
+	after := assignNodeAllocatedResourceAfterOf(t, w.linesCopy())
 	if after["gpu-0"] != "1000" {
 		t.Errorf("assign_node allocated_resource.gpu-0 = %v, want 1000", after["gpu-0"])
 	}
