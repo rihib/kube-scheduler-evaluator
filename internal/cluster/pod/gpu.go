@@ -131,7 +131,11 @@ func gpuAllocatedResourceOf(annotations map[string]string) (map[string]string, e
 		if err != nil {
 			return nil, fmt.Errorf("pod.gpuAllocatedResourceOf: invalid GPU index %q in %s %q", part, IndexAnnotationKey, indexRaw)
 		}
-		allocated[gpuResourceKey(index)] = milliRaw
+		key := gpuResourceKey(index)
+		if _, dup := allocated[key]; dup {
+			return nil, fmt.Errorf("pod.gpuAllocatedResourceOf: %s %q names GPU %d more than once", IndexAnnotationKey, indexRaw, index)
+		}
+		allocated[key] = milliRaw
 	}
 	return allocated, nil
 }
